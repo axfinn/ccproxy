@@ -1,0 +1,53 @@
+version: '3.8'
+
+services:
+  ccproxy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ccproxy
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ccproxy-data:/app/data
+      - ./config.yaml:/app/config.yaml:ro
+    environment:
+      # Required settings
+      - CCPROXY_JWT_SECRET=${CCPROXY_JWT_SECRET:?JWT secret is required}
+      - CCPROXY_ADMIN_KEY=${CCPROXY_ADMIN_KEY:?Admin key is required}
+
+      # Optional: Claude API keys (comma-separated)
+      - CCPROXY_CLAUDE_API_KEYS=${CCPROXY_CLAUDE_API_KEYS:-}
+
+      # Server settings
+      - CCPROXY_SERVER_PORT=8080
+      - CCPROXY_SERVER_HOST=0.0.0.0
+      - CCPROXY_SERVER_MODE=${CCPROXY_SERVER_MODE:-both}
+
+      # JWT settings
+      - CCPROXY_JWT_DEFAULT_EXPIRY=${CCPROXY_JWT_DEFAULT_EXPIRY:-720h}
+      - CCPROXY_JWT_ISSUER=${CCPROXY_JWT_ISSUER:-ccproxy}
+
+      # Claude settings
+      - CCPROXY_CLAUDE_API_URL=${CCPROXY_CLAUDE_API_URL:-https://api.anthropic.com}
+      - CCPROXY_CLAUDE_WEB_URL=${CCPROXY_CLAUDE_WEB_URL:-https://claude.ai}
+      - CCPROXY_CLAUDE_KEY_STRATEGY=${CCPROXY_CLAUDE_KEY_STRATEGY:-round_robin}
+
+      # Storage
+      - CCPROXY_STORAGE_DB_PATH=/app/data/ccproxy.db
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  ccproxy-data:
+    driver: local

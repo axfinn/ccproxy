@@ -1,0 +1,29 @@
+server:
+  port: 8080
+  host: "0.0.0.0"
+  mode: "both"  # "web", "api", or "both"
+  read_timeout: 30
+  write_timeout: 300
+
+jwt:
+  # Secret key for signing JWT tokens (required)
+  # Set via environment: CCPROXY_JWT_SECRET
+  secret: ""
+  default_expiry: "720h"  # 30 days
+  issuer: "ccproxy"
+
+claude:
+  # API keys for Anthropic API (API mode)
+  # Set via environment: CCPROXY_CLAUDE_API_KEYS (comma-separated)
+  api_keys: []
+  api_url: "https://api.anthropic.com"
+  web_url: "https://claude.ai"
+  key_strategy: "round_robin"  # "round_robin" or "random"
+
+admin:
+  # Admin key for management operations (required)
+  # Set via environment: CCPROXY_ADMIN_KEY
+  key: ""
+
+storage:
+  db_path: "./ccproxy.db"
