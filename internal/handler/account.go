@@ -223,7 +223,7 @@ func (h *AccountHandler) RefreshToken(c *gin.Context) {
 		return
 	}
 
-	if err := h.oauthService.RefreshToken(account); err != nil {
+	if err := h.oauthService.RefreshAccountToken(account); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}

@@ -75,11 +75,14 @@ func (s *Store) migrate() error {
 			last_check_at DATETIME,
 			health_status TEXT DEFAULT 'unknown',
 			error_count INTEGER DEFAULT 0,
-			success_count INTEGER DEFAULT 0
+			success_count INTEGER DEFAULT 0,
+			max_concurrency INTEGER DEFAULT 5,
+			priority INTEGER DEFAULT 0
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_accounts_is_active ON accounts(is_active)`,
 		`CREATE INDEX IF NOT EXISTS idx_accounts_type ON accounts(type)`,
 		`CREATE INDEX IF NOT EXISTS idx_accounts_health ON accounts(health_status)`,
+		`CREATE INDEX IF NOT EXISTS idx_accounts_priority ON accounts(priority)`,
 	}
 
 	for _, query := range queries {

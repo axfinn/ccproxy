@@ -27,3 +27,71 @@ admin:
 
 storage:
   db_path: "./ccproxy.db"
+
+# Connection Pool Configuration
+pool:
+  max_idle_conns: 240
+  max_idle_conns_per_host: 120
+  idle_conn_timeout: "90s"
+  max_clients: 5000
+  client_idle_ttl: "15m"
+  response_timeout: "10m"
+
+# Circuit Breaker Configuration
+circuit:
+  enabled: true
+  failure_threshold: 5      # Failures before opening circuit
+  success_threshold: 2      # Successes before closing circuit
+  open_timeout: "30s"       # Time before half-open
+
+# Concurrency Control Configuration
+concurrency:
+  user_max: 10              # Max concurrent requests per user
+  account_max: 5            # Max concurrent requests per account
+  max_wait_queue: 20        # Max waiting requests
+  wait_timeout: "30s"       # Max time to wait for slot
+  backoff_base: "100ms"     # Initial backoff duration
+  backoff_max: "2s"         # Maximum backoff duration
+  backoff_jitter: 0.2       # Jitter factor (0-1)
+  ping_interval: "5s"       # SSE ping interval while waiting
+
+# Rate Limiting Configuration
+ratelimit:
+  enabled: true
+  user_limit:
+    requests: 100
+    window: "1m"
+  account_limit:
+    requests: 1000
+    window: "1m"
+  ip_limit:
+    requests: 200
+    window: "1m"
+  global_limit:
+    requests: 10000
+    window: "1m"
+
+# Retry Configuration
+retry:
+  max_attempts: 3           # Max retry attempts per account
+  max_account_switches: 10  # Max account switches
+  initial_backoff: "100ms"  # Initial backoff duration
+  max_backoff: "2s"         # Maximum backoff duration
+  jitter: 0.2               # Jitter factor (0-1)
+
+# Health Monitor Configuration
+health:
+  enabled: true
+  check_interval: "5m"       # Background check interval
+  token_refresh_before: "30m" # Refresh tokens before expiry
+  timeout: "30s"             # Health check timeout
+
+# Scheduler Configuration
+scheduler:
+  sticky_session_ttl: "1h"   # Sticky session TTL
+  strategy: "least_loaded"   # "least_loaded", "round_robin", or "random"
+
+# Metrics Configuration
+metrics:
+  enabled: true
+  path: "/metrics"           # Metrics endpoint path

@@ -13,10 +13,18 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 
+	"ccproxy/internal/circuit"
+	"ccproxy/internal/concurrency"
 	"ccproxy/internal/config"
 	"ccproxy/internal/handler"
+	"ccproxy/internal/health"
 	"ccproxy/internal/loadbalancer"
+	"ccproxy/internal/metrics"
 	"ccproxy/internal/middleware"
+	"ccproxy/internal/pool"
+	"ccproxy/internal/ratelimit"
+	"ccproxy/internal/retry"
+	"ccproxy/internal/scheduler"
 	"ccproxy/internal/service"
 	"ccproxy/internal/store"
 	"ccproxy/pkg/jwt"
@@ -66,11 +74,121 @@ func main() {
 	// Initialize OAuth service
 	oauthService := service.NewOAuthService(cfg.Claude.WebURL, cfg.Claude.APIURL, db)
 
+	// Initialize enhanced components
+	httpPool := pool.NewHTTPPool(pool.PoolConfig{
+		MaxIdleConns:        cfg.Pool.MaxIdleConns,
+		MaxIdleConnsPerHost: cfg.Pool.MaxIdleConnsPerHost,
+		IdleConnTimeout:     cfg.Pool.IdleConnTimeout,
+		MaxClients:          cfg.Pool.MaxClients,
+		ClientIdleTTL:       cfg.Pool.ClientIdleTTL,
+		ResponseTimeout:     cfg.Pool.ResponseTimeout,
+	})
+	defer httpPool.Close()
+	log.Info().Msg("initialized connection pool")
+
+	circuitMgr := circuit.NewManager(circuit.BreakerConfig{
+		Enabled:          cfg.Circuit.Enabled,
+		FailureThreshold: cfg.Circuit.FailureThreshold,
+		SuccessThreshold: cfg.Circuit.SuccessThreshold,
+		OpenTimeout:      cfg.Circuit.OpenTimeout,
+	})
+	defer circuitMgr.Close()
+	log.Info().Bool("enabled", cfg.Circuit.Enabled).Msg("initialized circuit breaker manager")
+
+	concurrencyMgr := concurrency.NewManager(concurrency.ConcurrencyConfig{
+		UserMax:       cfg.Concurrency.UserMax,
+		AccountMax:    cfg.Concurrency.AccountMax,
+		MaxWaitQueue:  cfg.Concurrency.MaxWaitQueue,
+		WaitTimeout:   cfg.Concurrency.WaitTimeout,
+		BackoffBase:   cfg.Concurrency.BackoffBase,
+		BackoffMax:    cfg.Concurrency.BackoffMax,
+		BackoffJitter: cfg.Concurrency.BackoffJitter,
+		PingInterval:  cfg.Concurrency.PingInterval,
+	})
+	defer concurrencyMgr.Close()
+	log.Info().Int("user_max", cfg.Concurrency.UserMax).Int("account_max", cfg.Concurrency.AccountMax).Msg("initialized concurrency manager")
+
+	rateLimiter := ratelimit.NewMultiMemoryLimiter(ratelimit.RateLimitConfig{
+		Enabled: cfg.RateLimit.Enabled,
+		UserLimit: ratelimit.LimitRule{
+			Requests: cfg.RateLimit.UserLimit.Requests,
+			Window:   cfg.RateLimit.UserLimit.Window,
+		},
+		AccountLimit: ratelimit.LimitRule{
+			Requests: cfg.RateLimit.AccountLimit.Requests,
+			Window:   cfg.RateLimit.AccountLimit.Window,
+		},
+		IPLimit: ratelimit.LimitRule{
+			Requests: cfg.RateLimit.IPLimit.Requests,
+			Window:   cfg.RateLimit.IPLimit.Window,
+		},
+		GlobalLimit: ratelimit.LimitRule{
+			Requests: cfg.RateLimit.GlobalLimit.Requests,
+			Window:   cfg.RateLimit.GlobalLimit.Window,
+		},
+	})
+	defer rateLimiter.Close()
+	log.Info().Bool("enabled", cfg.RateLimit.Enabled).Msg("initialized rate limiter")
+
+	schedulerSvc := scheduler.NewScheduler(scheduler.SchedulerConfig{
+		StickySessionTTL: cfg.Scheduler.StickySessionTTL,
+		Strategy:         scheduler.Strategy(cfg.Scheduler.Strategy),
+	}, circuitMgr, concurrencyMgr)
+	defer schedulerSvc.Close()
+	log.Info().Str("strategy", cfg.Scheduler.Strategy).Msg("initialized scheduler")
+
+	retryPolicy := retry.NewPolicy(retry.RetryConfig{
+		MaxAttempts:        cfg.Retry.MaxAttempts,
+		MaxAccountSwitches: cfg.Retry.MaxAccountSwitches,
+		InitialBackoff:     cfg.Retry.InitialBackoff,
+		MaxBackoff:         cfg.Retry.MaxBackoff,
+		Jitter:             cfg.Retry.Jitter,
+	})
+	retryExecutor := retry.NewExecutor(retryPolicy)
+	log.Info().Int("max_attempts", cfg.Retry.MaxAttempts).Int("max_switches", cfg.Retry.MaxAccountSwitches).Msg("initialized retry executor")
+
+	var metricsCollector *metrics.Metrics
+	if cfg.Metrics.Enabled {
+		metricsCollector = metrics.NewMetrics(metrics.MetricsConfig{
+			Enabled: cfg.Metrics.Enabled,
+			Path:    cfg.Metrics.Path,
+		})
+		log.Info().Str("path", cfg.Metrics.Path).Msg("initialized Prometheus metrics")
+	}
+
+	// Initialize health monitor
+	var healthMonitor health.Monitor
+	if cfg.Health.Enabled {
+		healthMonitor = health.NewMonitor(health.HealthConfig{
+			Enabled:            cfg.Health.Enabled,
+			CheckInterval:      cfg.Health.CheckInterval,
+			TokenRefreshBefore: cfg.Health.TokenRefreshBefore,
+			Timeout:            cfg.Health.Timeout,
+		}, db, circuitMgr, oauthService)
+		log.Info().Dur("interval", cfg.Health.CheckInterval).Msg("initialized health monitor")
+	}
+
 	// Initialize handlers
 	tokenHandler := handler.NewTokenHandler(jwtManager, db, cfg.JWT.DefaultExpiry)
 	sessionHandler := handler.NewSessionHandler(db)
 	accountHandler := handler.NewAccountHandler(db, oauthService)
-	proxyHandler := handler.NewProxyHandler(db, keyPool, cfg.Claude.WebURL, cfg.Claude.APIURL)
+
+	// Use enhanced proxy handler
+	enhancedProxyHandler := handler.NewEnhancedProxyHandler(handler.EnhancedProxyConfig{
+		Store:       db,
+		KeyPool:     keyPool,
+		WebURL:      cfg.Claude.WebURL,
+		APIURL:      cfg.Claude.APIURL,
+		Pool:        httpPool,
+		Scheduler:   schedulerSvc,
+		Circuit:     circuitMgr,
+		Concurrency: concurrencyMgr,
+		RateLimit:   rateLimiter,
+		Retry:       retryExecutor,
+		Metrics:     metricsCollector,
+	})
+
+	// Keep legacy handlers for specific endpoints
 	webProxyHandler := handler.NewWebProxyHandler(db, cfg.Claude.WebURL)
 	apiProxyHandler := handler.NewAPIProxyHandler(keyPool, cfg.Claude.APIURL)
 
@@ -88,6 +206,11 @@ func main() {
 	router.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
+
+	// Prometheus metrics endpoint
+	if metricsCollector != nil {
+		router.GET(cfg.Metrics.Path, metricsCollector.Handler())
+	}
 
 	// Admin API routes (require admin key)
 	admin := router.Group("/api")
@@ -117,6 +240,31 @@ func main() {
 
 		// Key stats (API mode)
 		admin.GET("/keys/stats", apiProxyHandler.GetKeyStats)
+
+		// Enhanced stats endpoints
+		admin.GET("/stats/pool", func(c *gin.Context) {
+			c.JSON(http.StatusOK, httpPool.Stats())
+		})
+		admin.GET("/stats/circuit", func(c *gin.Context) {
+			c.JSON(http.StatusOK, circuitMgr.Stats())
+		})
+		admin.GET("/stats/concurrency", func(c *gin.Context) {
+			c.JSON(http.StatusOK, concurrencyMgr.Stats())
+		})
+		admin.GET("/stats/ratelimit", func(c *gin.Context) {
+			c.JSON(http.StatusOK, rateLimiter.Stats())
+		})
+		admin.GET("/stats/scheduler", func(c *gin.Context) {
+			c.JSON(http.StatusOK, schedulerSvc.Stats())
+		})
+		admin.GET("/stats/retry", func(c *gin.Context) {
+			c.JSON(http.StatusOK, retryExecutor.Stats())
+		})
+		if healthMonitor != nil {
+			admin.GET("/stats/health", func(c *gin.Context) {
+				c.JSON(http.StatusOK, healthMonitor.Stats())
+			})
+		}
 	}
 
 	// User API routes (require JWT)
@@ -126,14 +274,14 @@ func main() {
 		api.GET("/token/info", tokenHandler.Info)
 	}
 
-	// OpenAI-compatible endpoints (require JWT)
+	// OpenAI-compatible endpoints (require JWT) - use enhanced handler
 	v1 := router.Group("/v1")
 	v1.Use(jwtMiddleware.Auth())
 	{
-		v1.POST("/chat/completions", proxyHandler.ChatCompletions)
-		v1.GET("/models", proxyHandler.ListModels)
+		v1.POST("/chat/completions", enhancedProxyHandler.ChatCompletions)
+		v1.GET("/models", enhancedProxyHandler.ListModels)
 
-		// Native Anthropic API proxy
+		// Native Anthropic API proxy (keep using API handler)
 		v1.POST("/messages", apiProxyHandler.Messages)
 	}
 
@@ -158,6 +306,17 @@ func main() {
 		log.Info().Msg("admin UI available at /admin/")
 	}
 
+	// Start health monitor
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if healthMonitor != nil {
+		if err := healthMonitor.Start(ctx); err != nil {
+			log.Error().Err(err).Msg("failed to start health monitor")
+		}
+		defer healthMonitor.Stop()
+	}
+
 	// Start server
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
 	srv := &http.Server{
@@ -170,6 +329,14 @@ func main() {
 	// Graceful shutdown
 	go func() {
 		log.Info().Str("addr", addr).Msg("starting server")
+		log.Info().
+			Bool("pool", true).
+			Bool("circuit", cfg.Circuit.Enabled).
+			Bool("concurrency", true).
+			Bool("ratelimit", cfg.RateLimit.Enabled).
+			Bool("health", cfg.Health.Enabled).
+			Bool("metrics", cfg.Metrics.Enabled).
+			Msg("enhanced features enabled")
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatal().Err(err).Msg("failed to start server")
 		}
@@ -182,10 +349,10 @@ func main() {
 
 	log.Info().Msg("shutting down server...")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutdownCancel()
 
-	if err := srv.Shutdown(ctx); err != nil {
+	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Fatal().Err(err).Msg("server forced to shutdown")
 	}
 

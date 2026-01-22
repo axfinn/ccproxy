@@ -2,6 +2,7 @@ package service
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -232,8 +233,8 @@ func (s *OAuthService) Login(req LoginRequest) (*LoginResult, error) {
 	return result, nil
 }
 
-// RefreshToken refreshes an expired OAuth token
-func (s *OAuthService) RefreshToken(account *store.Account) error {
+// RefreshAccountToken refreshes an expired OAuth token for a specific account
+func (s *OAuthService) RefreshAccountToken(account *store.Account) error {
 	if !account.IsOAuth() {
 		return fmt.Errorf("account is not an OAuth account")
 	}
@@ -289,6 +290,23 @@ func (s *OAuthService) RefreshToken(account *store.Account) error {
 	return nil
 }
 
+// RefreshTokenByID refreshes an OAuth token by account ID (implements health.TokenRefresher)
+func (s *OAuthService) RefreshToken(ctx context.Context, accountID string) error {
+	account, err := s.store.GetAccount(accountID)
+	if err != nil {
+		return fmt.Errorf("failed to get account: %w", err)
+	}
+	if account == nil {
+		return fmt.Errorf("account not found: %s", accountID)
+	}
+	return s.RefreshAccountToken(account)
+}
+
+// NeedsRefresh returns true if the account needs token refresh (implements health.TokenRefresher)
+func (s *OAuthService) NeedsRefresh(account *store.Account) bool {
+	return account.NeedsRefresh()
+}
+
 // CheckHealth performs a health check on the account
 func (s *OAuthService) CheckHealth(account *store.Account) error {
 	// Try a simple API call to check if the token is valid
@@ -332,7 +350,7 @@ func (s *OAuthService) CheckHealth(account *store.Account) error {
 	// Check if token needs refresh
 	if resp.StatusCode == 401 && account.IsOAuth() {
 		log.Info().Str("account_id", account.ID).Msg("token expired, attempting refresh")
-		if err := s.RefreshToken(account); err != nil {
+		if err := s.RefreshAccountToken(account); err != nil {
 			s.store.UpdateAccountHealth(account.ID, "unhealthy")
 			return fmt.Errorf("token refresh failed: %w", err)
 		}

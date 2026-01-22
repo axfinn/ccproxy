@@ -33,6 +33,9 @@ type Account struct {
 	HealthStatus  string     `json:"health_status,omitempty"` // "healthy", "unhealthy", "unknown"
 	ErrorCount    int        `json:"error_count"`
 	SuccessCount  int        `json:"success_count"`
+	// Enhanced features
+	MaxConcurrency int `json:"max_concurrency"` // Max concurrent requests for this account
+	Priority       int `json:"priority"`        // Priority for scheduling (higher = preferred)
 }
 
 // Credentials holds account authentication data
