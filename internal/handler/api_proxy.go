@@ -69,35 +69,51 @@ func (h *APIProxyHandler) proxyRequest(c *gin.Context, path string) {
 		return
 	}
 
-	// Create proxy request
-	req, err := http.NewRequest(c.Request.Method, targetURL, bytes.NewReader(bodyBytes))
+	// Create proxy request with context
+	req, err := http.NewRequestWithContext(c.Request.Context(), c.Request.Method, targetURL, bytes.NewReader(bodyBytes))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create request"})
 		return
 	}
 
-	// Copy headers (excluding auth-related ones)
+	// Set authentication header
+	req.Header.Set("x-api-key", apiKey)
+
+	// Whitelist headers to forward (similar to sub2api)
+	allowedHeaders := map[string]bool{
+		"accept":                      true,
+		"accept-encoding":             true,
+		"content-type":                true,
+		"user-agent":                  true,
+		"anthropic-beta":              true,
+		"x-stainless-lang":            true,
+		"x-stainless-package-version": true,
+		"x-stainless-os":              true,
+		"x-stainless-arch":            true,
+		"x-stainless-runtime":         true,
+		"x-stainless-runtime-version": true,
+	}
+
+	// Copy allowed headers from client request
 	for key, values := range c.Request.Header {
 		lowerKey := strings.ToLower(key)
-		if lowerKey == "authorization" || lowerKey == "x-api-key" || lowerKey == "host" {
-			continue
-		}
-		for _, value := range values {
-			req.Header.Add(key, value)
+		if allowedHeaders[lowerKey] {
+			for _, value := range values {
+				req.Header.Add(key, value)
+			}
 		}
 	}
 
-	// Set Anthropic API headers
-	req.Header.Set("x-api-key", apiKey)
-	req.Header.Set("anthropic-version", "2023-06-01")
+	// Ensure required headers are set
 	if req.Header.Get("Content-Type") == "" {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	// 添加标准 User-Agent 避免被识别为异常客户端
+	if req.Header.Get("anthropic-version") == "" {
+		req.Header.Set("anthropic-version", "2023-06-01")
+	}
 	if req.Header.Get("User-Agent") == "" {
 		req.Header.Set("User-Agent", "anthropic-sdk-go/0.1.0")
 	}
-	// 添加 Accept-Encoding
 	if req.Header.Get("Accept-Encoding") == "" {
 		req.Header.Set("Accept-Encoding", "gzip, deflate, br")
 	}

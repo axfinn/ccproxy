@@ -17,6 +17,7 @@ import (
 	"ccproxy/internal/handler"
 	"ccproxy/internal/loadbalancer"
 	"ccproxy/internal/middleware"
+	"ccproxy/internal/service"
 	"ccproxy/internal/store"
 	"ccproxy/pkg/jwt"
 	"ccproxy/web"
@@ -62,9 +63,13 @@ func main() {
 		log.Warn().Msg("no API keys configured, API mode will be unavailable")
 	}
 
+	// Initialize OAuth service
+	oauthService := service.NewOAuthService(cfg.Claude.WebURL, cfg.Claude.APIURL, db)
+
 	// Initialize handlers
 	tokenHandler := handler.NewTokenHandler(jwtManager, db, cfg.JWT.DefaultExpiry)
 	sessionHandler := handler.NewSessionHandler(db)
+	accountHandler := handler.NewAccountHandler(db, oauthService)
 	proxyHandler := handler.NewProxyHandler(db, keyPool, cfg.Claude.WebURL, cfg.Claude.APIURL)
 	webProxyHandler := handler.NewWebProxyHandler(db, cfg.Claude.WebURL)
 	apiProxyHandler := handler.NewAPIProxyHandler(keyPool, cfg.Claude.APIURL)
@@ -93,7 +98,18 @@ func main() {
 		admin.GET("/token/list", tokenHandler.List)
 		admin.POST("/token/revoke", tokenHandler.Revoke)
 
-		// Session management (Web mode)
+		// Account management (replaces session management)
+		admin.POST("/account/oauth", accountHandler.CreateOAuthAccount)
+		admin.POST("/account/sessionkey", accountHandler.CreateSessionKeyAccount)
+		admin.GET("/account/list", accountHandler.ListAccounts)
+		admin.GET("/account/:id", accountHandler.GetAccount)
+		admin.PUT("/account/:id", accountHandler.UpdateAccount)
+		admin.DELETE("/account/:id", accountHandler.DeleteAccount)
+		admin.POST("/account/:id/deactivate", accountHandler.DeactivateAccount)
+		admin.POST("/account/:id/refresh", accountHandler.RefreshToken)
+		admin.POST("/account/:id/check", accountHandler.CheckHealth)
+
+		// Legacy session endpoints (for backward compatibility)
 		admin.POST("/session/add", sessionHandler.Add)
 		admin.GET("/session/list", sessionHandler.List)
 		admin.DELETE("/session/:id", sessionHandler.Delete)

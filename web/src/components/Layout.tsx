@@ -4,6 +4,7 @@ import { Button } from '@/components/ui/button';
 import {
   LayoutDashboard,
   Key,
+  Users,
   Globe,
   Server,
   LogOut,
@@ -16,7 +17,8 @@ import { useState } from 'react';
 const navigation = [
   { name: '控制台', href: '/', icon: LayoutDashboard },
   { name: '令牌管理', href: '/tokens', icon: Key },
-  { name: '会话管理', href: '/sessions', icon: Globe },
+  { name: '账号管理', href: '/accounts', icon: Users },
+  { name: '会话管理 (旧)', href: '/sessions', icon: Globe },
   { name: 'API 密钥', href: '/api-keys', icon: Server },
   { name: '配置文档', href: '/docs', icon: BookOpen },
 ];

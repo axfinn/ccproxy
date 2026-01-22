@@ -58,9 +58,9 @@ type WebCompletionRequest struct {
 
 // CreateConversation creates a new conversation on claude.ai
 func (h *WebProxyHandler) CreateConversation(c *gin.Context) {
-	session, err := h.store.GetActiveSession()
-	if err != nil || session == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "no active session available"})
+	account, err := h.store.GetActiveAccount()
+	if err != nil || account == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "no active account available"})
 		return
 	}
 
@@ -78,14 +78,14 @@ func (h *WebProxyHandler) CreateConversation(c *gin.Context) {
 	}
 	payloadBytes, _ := json.Marshal(payload)
 
-	url := fmt.Sprintf("%s/api/organizations/%s/chat_conversations", h.webURL, session.OrganizationID)
-	req, err := http.NewRequest("POST", url, bytes.NewReader(payloadBytes))
+	url := fmt.Sprintf("%s/api/organizations/%s/chat_conversations", h.webURL, account.OrganizationID)
+	req, err := http.NewRequestWithContext(c.Request.Context(), "POST", url, bytes.NewReader(payloadBytes))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create request"})
 		return
 	}
 
-	h.setWebHeaders(req, session)
+	h.setWebHeaders(req, account)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := h.httpClient.Do(req)
@@ -95,8 +95,8 @@ func (h *WebProxyHandler) CreateConversation(c *gin.Context) {
 	}
 	defer resp.Body.Close()
 
-	// Update session last used
-	go h.store.UpdateSessionLastUsed(session.ID)
+	// Update account last used
+	go h.store.UpdateAccountLastUsed(account.ID)
 
 	body, _ := io.ReadAll(resp.Body)
 	c.Data(resp.StatusCode, resp.Header.Get("Content-Type"), body)
@@ -104,9 +104,9 @@ func (h *WebProxyHandler) CreateConversation(c *gin.Context) {
 
 // SendMessage sends a message to a conversation and streams the response
 func (h *WebProxyHandler) SendMessage(c *gin.Context) {
-	session, err := h.store.GetActiveSession()
-	if err != nil || session == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "no active session available"})
+	account, err := h.store.GetActiveAccount()
+	if err != nil || account == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "no active account available"})
 		return
 	}
 
@@ -135,14 +135,14 @@ func (h *WebProxyHandler) SendMessage(c *gin.Context) {
 	payloadBytes, _ := json.Marshal(reqBody)
 
 	url := fmt.Sprintf("%s/api/organizations/%s/chat_conversations/%s/completion",
-		h.webURL, session.OrganizationID, conversationID)
-	req, err := http.NewRequest("POST", url, bytes.NewReader(payloadBytes))
+		h.webURL, account.OrganizationID, conversationID)
+	req, err := http.NewRequestWithContext(c.Request.Context(), "POST", url, bytes.NewReader(payloadBytes))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create request"})
 		return
 	}
 
-	h.setWebHeaders(req, session)
+	h.setWebHeaders(req, account)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
 
@@ -153,8 +153,8 @@ func (h *WebProxyHandler) SendMessage(c *gin.Context) {
 	}
 	defer resp.Body.Close()
 
-	// Update session last used
-	go h.store.UpdateSessionLastUsed(session.ID)
+	// Update account last used
+	go h.store.UpdateAccountLastUsed(account.ID)
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -181,20 +181,20 @@ func (h *WebProxyHandler) SendMessage(c *gin.Context) {
 
 // ListConversations lists all conversations
 func (h *WebProxyHandler) ListConversations(c *gin.Context) {
-	session, err := h.store.GetActiveSession()
-	if err != nil || session == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "no active session available"})
+	account, err := h.store.GetActiveAccount()
+	if err != nil || account == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "no active account available"})
 		return
 	}
 
-	url := fmt.Sprintf("%s/api/organizations/%s/chat_conversations", h.webURL, session.OrganizationID)
-	req, err := http.NewRequest("GET", url, nil)
+	url := fmt.Sprintf("%s/api/organizations/%s/chat_conversations", h.webURL, account.OrganizationID)
+	req, err := http.NewRequestWithContext(c.Request.Context(), "GET", url, nil)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create request"})
 		return
 	}
 
-	h.setWebHeaders(req, session)
+	h.setWebHeaders(req, account)
 
 	resp, err := h.httpClient.Do(req)
 	if err != nil {
@@ -203,8 +203,8 @@ func (h *WebProxyHandler) ListConversations(c *gin.Context) {
 	}
 	defer resp.Body.Close()
 
-	// Update session last used
-	go h.store.UpdateSessionLastUsed(session.ID)
+	// Update account last used
+	go h.store.UpdateAccountLastUsed(account.ID)
 
 	body, _ := io.ReadAll(resp.Body)
 	c.Data(resp.StatusCode, resp.Header.Get("Content-Type"), body)
@@ -212,9 +212,9 @@ func (h *WebProxyHandler) ListConversations(c *gin.Context) {
 
 // GetConversation gets a specific conversation
 func (h *WebProxyHandler) GetConversation(c *gin.Context) {
-	session, err := h.store.GetActiveSession()
-	if err != nil || session == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "no active session available"})
+	account, err := h.store.GetActiveAccount()
+	if err != nil || account == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "no active account available"})
 		return
 	}
 
@@ -224,14 +224,14 @@ func (h *WebProxyHandler) GetConversation(c *gin.Context) {
 		return
 	}
 
-	url := fmt.Sprintf("%s/api/organizations/%s/chat_conversations/%s", h.webURL, session.OrganizationID, conversationID)
-	req, err := http.NewRequest("GET", url, nil)
+	url := fmt.Sprintf("%s/api/organizations/%s/chat_conversations/%s", h.webURL, account.OrganizationID, conversationID)
+	req, err := http.NewRequestWithContext(c.Request.Context(), "GET", url, nil)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create request"})
 		return
 	}
 
-	h.setWebHeaders(req, session)
+	h.setWebHeaders(req, account)
 
 	resp, err := h.httpClient.Do(req)
 	if err != nil {
@@ -240,8 +240,8 @@ func (h *WebProxyHandler) GetConversation(c *gin.Context) {
 	}
 	defer resp.Body.Close()
 
-	// Update session last used
-	go h.store.UpdateSessionLastUsed(session.ID)
+	// Update account last used
+	go h.store.UpdateAccountLastUsed(account.ID)
 
 	body, _ := io.ReadAll(resp.Body)
 	c.Data(resp.StatusCode, resp.Header.Get("Content-Type"), body)
@@ -249,9 +249,9 @@ func (h *WebProxyHandler) GetConversation(c *gin.Context) {
 
 // DeleteConversation deletes a conversation
 func (h *WebProxyHandler) DeleteConversation(c *gin.Context) {
-	session, err := h.store.GetActiveSession()
-	if err != nil || session == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "no active session available"})
+	account, err := h.store.GetActiveAccount()
+	if err != nil || account == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "no active account available"})
 		return
 	}
 
@@ -261,14 +261,14 @@ func (h *WebProxyHandler) DeleteConversation(c *gin.Context) {
 		return
 	}
 
-	url := fmt.Sprintf("%s/api/organizations/%s/chat_conversations/%s", h.webURL, session.OrganizationID, conversationID)
-	req, err := http.NewRequest("DELETE", url, nil)
+	url := fmt.Sprintf("%s/api/organizations/%s/chat_conversations/%s", h.webURL, account.OrganizationID, conversationID)
+	req, err := http.NewRequestWithContext(c.Request.Context(), "DELETE", url, nil)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create request"})
 		return
 	}
 
-	h.setWebHeaders(req, session)
+	h.setWebHeaders(req, account)
 
 	resp, err := h.httpClient.Do(req)
 	if err != nil {
@@ -277,14 +277,14 @@ func (h *WebProxyHandler) DeleteConversation(c *gin.Context) {
 	}
 	defer resp.Body.Close()
 
-	// Update session last used
-	go h.store.UpdateSessionLastUsed(session.ID)
+	// Update account last used
+	go h.store.UpdateAccountLastUsed(account.ID)
 
 	body, _ := io.ReadAll(resp.Body)
 	c.Data(resp.StatusCode, resp.Header.Get("Content-Type"), body)
 }
 
-func (h *WebProxyHandler) setWebHeaders(req *http.Request, session *store.Session) {
+func (h *WebProxyHandler) setWebHeaders(req *http.Request, account *store.Account) {
 	// 使用最新的 Chrome User-Agent (2026)
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
 
@@ -310,15 +310,23 @@ func (h *WebProxyHandler) setWebHeaders(req *http.Request, session *store.Sessio
 	req.Header.Set("Origin", h.webURL)
 	req.Header.Set("Referer", h.webURL+"/")
 
-	// Cookie 必须在最后设置
-	req.Header.Set("Cookie", fmt.Sprintf("sessionKey=%s", session.SessionKey))
+	// Set authentication based on account type
+	if account.IsOAuth() {
+		// OAuth accounts use Bearer token
+		req.Header.Set("Authorization", "Bearer "+account.Credentials.AccessToken)
+		// Add OAuth beta flag if available
+		req.Header.Set("anthropic-beta", "oauth-2025-04-20")
+	} else {
+		// Session key accounts use Cookie
+		req.Header.Set("Cookie", fmt.Sprintf("sessionKey=%s", account.Credentials.SessionKey))
+	}
 }
 
 // ProxyGeneric proxies any request to claude.ai (for unsupported endpoints)
 func (h *WebProxyHandler) ProxyGeneric(c *gin.Context) {
-	session, err := h.store.GetActiveSession()
-	if err != nil || session == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "no active session available"})
+	account, err := h.store.GetActiveAccount()
+	if err != nil || account == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "no active account available"})
 		return
 	}
 
@@ -341,7 +349,7 @@ func (h *WebProxyHandler) ProxyGeneric(c *gin.Context) {
 	}
 
 	// Create proxy request
-	req, err := http.NewRequest(c.Request.Method, targetURL, bytes.NewReader(bodyBytes))
+	req, err := http.NewRequestWithContext(c.Request.Context(), c.Request.Method, targetURL, bytes.NewReader(bodyBytes))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create request"})
 		return
@@ -358,7 +366,7 @@ func (h *WebProxyHandler) ProxyGeneric(c *gin.Context) {
 		}
 	}
 
-	h.setWebHeaders(req, session)
+	h.setWebHeaders(req, account)
 
 	resp, err := h.httpClient.Do(req)
 	if err != nil {
@@ -368,8 +376,8 @@ func (h *WebProxyHandler) ProxyGeneric(c *gin.Context) {
 	}
 	defer resp.Body.Close()
 
-	// Update session last used
-	go h.store.UpdateSessionLastUsed(session.ID)
+	// Update account last used
+	go h.store.UpdateAccountLastUsed(account.ID)
 
 	// Copy response headers
 	for key, values := range resp.Header {

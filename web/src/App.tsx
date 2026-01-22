@@ -5,6 +5,7 @@ import { Layout } from '@/components/Layout';
 import { Login } from '@/pages/Login';
 import { Dashboard } from '@/pages/Dashboard';
 import { Tokens } from '@/pages/Tokens';
+import { Accounts } from '@/pages/Accounts';
 import { Sessions } from '@/pages/Sessions';
 import { ApiKeys } from '@/pages/ApiKeys';
 import { Docs } from '@/pages/Docs';
@@ -50,6 +51,7 @@ function AppRoutes() {
       >
         <Route index element={<Dashboard />} />
         <Route path="tokens" element={<Tokens />} />
+        <Route path="accounts" element={<Accounts />} />
         <Route path="sessions" element={<Sessions />} />
         <Route path="api-keys" element={<ApiKeys />} />
         <Route path="docs" element={<Docs />} />

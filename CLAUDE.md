@@ -44,13 +44,16 @@ ccproxy is a Go proxy service for Claude with dual-mode support (Web mode via cl
 - `internal/config/` - Viper-based configuration (config.yaml + CCPROXY_* env vars)
 - `internal/handler/` - HTTP handlers:
   - `token.go` - JWT token generation/revocation (admin endpoints)
-  - `session.go` - Web mode session management (admin endpoints)
+  - `session.go` - Legacy session management (admin endpoints, kept for backward compatibility)
+  - `account.go` - OAuth account management (admin endpoints)
   - `proxy.go` - OpenAI-compatible /v1/chat/completions router
   - `web_proxy.go` - claude.ai proxy for web mode
   - `api_proxy.go` - Anthropic API proxy with key pool
 - `internal/middleware/` - JWT auth and admin key middleware
 - `internal/loadbalancer/` - API key pool with round-robin/random strategies
-- `internal/store/` - SQLite storage for tokens and sessions
+- `internal/store/` - SQLite storage for tokens, accounts (replaces sessions)
+- `internal/service/` - Business logic layer:
+  - `oauth.go` - OAuth login flow and token refresh
 - `pkg/jwt/` - JWT token generation/validation
 
 **Request Flow:**
@@ -63,6 +66,55 @@ ccproxy is a Go proxy service for Claude with dual-mode support (Web mode via cl
 **Configuration:** Uses Viper with `CCPROXY_` prefix for env vars. Required: `CCPROXY_JWT_SECRET`, `CCPROXY_ADMIN_KEY`. For API mode: `CCPROXY_CLAUDE_API_KEYS`.
 
 ## Recent Updates (2026-01-22)
+
+### OAuth Account Management (Latest)
+
+**Major Architecture Update:** Unified account management system with full OAuth support.
+
+**Key Features:**
+- **3-Step OAuth Login**: Automatically converts sessionKey to OAuth access token
+  - Step 1: Get organization UUID from claude.ai
+  - Step 2: Obtain authorization code with PKCE
+  - Step 3: Exchange for access token and refresh token
+- **Automatic Token Refresh**: Monitors token expiration and auto-refreshes
+- **Health Monitoring**: Built-in health checks for account validation
+- **Account Types**:
+  - `oauth` - OAuth accounts with automatic token refresh
+  - `session_key` - Legacy sessionKey support (backward compatible)
+  - `api_key` - Direct API key (future support)
+- **Database Migration**: Automatic migration from `sessions` to `accounts` table
+
+**New API Endpoints:**
+```
+POST   /api/account/oauth           # OAuth login (sessionKey → OAuth token)
+POST   /api/account/sessionkey      # Create session key account (legacy)
+GET    /api/account/list            # List all accounts
+GET    /api/account/:id             # Get account details
+PUT    /api/account/:id             # Update account
+DELETE /api/account/:id             # Delete account
+POST   /api/account/:id/deactivate  # Deactivate account
+POST   /api/account/:id/refresh     # Manual token refresh
+POST   /api/account/:id/check       # Health check
+```
+
+**Anti-Detection Features:**
+- OAuth Bearer token authentication (better than Cookie)
+- Browser fingerprint simulation (Chrome 131)
+- Identity isolation between accounts
+
+**Files Added/Modified:**
+- `internal/store/account.go` - New unified account data model
+- `internal/service/oauth.go` - OAuth login and token refresh service
+- `internal/handler/account.go` - Account management API handlers
+- `internal/store/sqlite.go` - Database migration for accounts table
+- `cmd/server/main.go` - Registered account management routes
+- `internal/handler/web_proxy.go` - Updated to use Account instead of Session
+- `internal/handler/proxy.go` - Updated to use Account instead of Session
+- `docs/OAUTH_GUIDE.md` - Complete OAuth usage documentation
+- `test-oauth-account.sh` - OAuth account management test script
+
+**Usage:**
+See [OAuth Account Management Guide](./docs/OAUTH_GUIDE.md) for detailed usage instructions.
 
 ### Anti-Detection Optimizations
 

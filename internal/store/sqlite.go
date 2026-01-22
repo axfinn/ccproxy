@@ -61,17 +61,25 @@ func (s *Store) migrate() error {
 		`CREATE INDEX IF NOT EXISTS idx_tokens_expires_at ON tokens(expires_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_tokens_revoked_at ON tokens(revoked_at)`,
 
-		`CREATE TABLE IF NOT EXISTS sessions (
+		// New accounts table for OAuth support
+		`CREATE TABLE IF NOT EXISTS accounts (
 			id TEXT PRIMARY KEY,
 			name TEXT NOT NULL,
-			session_key TEXT NOT NULL,
+			type TEXT NOT NULL,
+			credentials TEXT NOT NULL,
 			organization_id TEXT,
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 			expires_at DATETIME,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 			last_used_at DATETIME,
-			is_active BOOLEAN DEFAULT 1
+			is_active BOOLEAN DEFAULT 1,
+			last_check_at DATETIME,
+			health_status TEXT DEFAULT 'unknown',
+			error_count INTEGER DEFAULT 0,
+			success_count INTEGER DEFAULT 0
 		)`,
-		`CREATE INDEX IF NOT EXISTS idx_sessions_is_active ON sessions(is_active)`,
+		`CREATE INDEX IF NOT EXISTS idx_accounts_is_active ON accounts(is_active)`,
+		`CREATE INDEX IF NOT EXISTS idx_accounts_type ON accounts(type)`,
+		`CREATE INDEX IF NOT EXISTS idx_accounts_health ON accounts(health_status)`,
 	}
 
 	for _, query := range queries {
@@ -80,7 +88,68 @@ func (s *Store) migrate() error {
 		}
 	}
 
+	// Migrate data from sessions table to accounts table if sessions exist
+	if err := s.migrateSessionsToAccounts(); err != nil {
+		return err
+	}
+
 	return nil
+}
+
+// migrateSessionsToAccounts migrates legacy sessions to accounts
+func (s *Store) migrateSessionsToAccounts() error {
+	// Check if sessions table exists and has data
+	var count int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='sessions'`).Scan(&count)
+	if err != nil || count == 0 {
+		return nil // Sessions table doesn't exist, skip migration
+	}
+
+	// Check if we've already migrated (accounts table has data)
+	var accountCount int
+	err = s.db.QueryRow(`SELECT COUNT(*) FROM accounts`).Scan(&accountCount)
+	if err != nil {
+		return err
+	}
+	if accountCount > 0 {
+		return nil // Already migrated
+	}
+
+	// Migrate sessions to accounts
+	rows, err := s.db.Query(`SELECT id, name, session_key, organization_id, created_at, expires_at, last_used_at, is_active FROM sessions`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var session Session
+		if err := rows.Scan(&session.ID, &session.Name, &session.SessionKey, &session.OrganizationID, &session.CreatedAt, &session.ExpiresAt, &session.LastUsedAt, &session.IsActive); err != nil {
+			return err
+		}
+
+		// Convert to account
+		account := &Account{
+			ID:             session.ID,
+			Name:           session.Name,
+			Type:           AccountTypeSessionKey,
+			OrganizationID: session.OrganizationID,
+			Credentials: Credentials{
+				SessionKey: session.SessionKey,
+			},
+			CreatedAt:    session.CreatedAt,
+			ExpiresAt:    session.ExpiresAt,
+			LastUsedAt:   session.LastUsedAt,
+			IsActive:     session.IsActive,
+			HealthStatus: "unknown",
+		}
+
+		if err := s.CreateAccount(account); err != nil {
+			return err
+		}
+	}
+
+	return rows.Err()
 }
 
 // Token operations

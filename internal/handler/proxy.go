@@ -404,9 +404,9 @@ func (h *ProxyHandler) streamAPIResponse(c *gin.Context, resp *http.Response, mo
 }
 
 func (h *ProxyHandler) handleWebMode(c *gin.Context, req *OpenAIChatRequest) {
-	session, err := h.store.GetActiveSession()
-	if err != nil || session == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "no active session available"})
+	account, err := h.store.GetActiveAccount()
+	if err != nil || account == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "no active account available"})
 		return
 	}
 
@@ -425,9 +425,9 @@ func (h *ProxyHandler) handleWebMode(c *gin.Context, req *OpenAIChatRequest) {
 	}
 	createPayloadBytes, _ := json.Marshal(createPayload)
 
-	createURL := fmt.Sprintf("%s/api/organizations/%s/chat_conversations", h.webURL, session.OrganizationID)
+	createURL := fmt.Sprintf("%s/api/organizations/%s/chat_conversations", h.webURL, account.OrganizationID)
 	createReq, _ := http.NewRequest("POST", createURL, bytes.NewReader(createPayloadBytes))
-	h.setWebHeaders(createReq, session)
+	h.setWebHeaders(createReq, account)
 	createReq.Header.Set("Content-Type", "application/json")
 
 	createResp, err := h.httpClient.Do(createReq)
@@ -454,9 +454,9 @@ func (h *ProxyHandler) handleWebMode(c *gin.Context, req *OpenAIChatRequest) {
 	msgPayloadBytes, _ := json.Marshal(msgPayload)
 
 	msgURL := fmt.Sprintf("%s/api/organizations/%s/chat_conversations/%s/completion",
-		h.webURL, session.OrganizationID, convUUID)
+		h.webURL, account.OrganizationID, convUUID)
 	msgReq, _ := http.NewRequest("POST", msgURL, bytes.NewReader(msgPayloadBytes))
-	h.setWebHeaders(msgReq, session)
+	h.setWebHeaders(msgReq, account)
 	msgReq.Header.Set("Content-Type", "application/json")
 	msgReq.Header.Set("Accept", "text/event-stream")
 
@@ -467,7 +467,7 @@ func (h *ProxyHandler) handleWebMode(c *gin.Context, req *OpenAIChatRequest) {
 	}
 	defer msgResp.Body.Close()
 
-	go h.store.UpdateSessionLastUsed(session.ID)
+	go h.store.UpdateAccountLastUsed(account.ID)
 
 	if msgResp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(msgResp.Body)
@@ -689,7 +689,7 @@ func (h *ProxyHandler) streamWebResponse(c *gin.Context, resp *http.Response, mo
 	}
 }
 
-func (h *ProxyHandler) setWebHeaders(req *http.Request, session *store.Session) {
+func (h *ProxyHandler) setWebHeaders(req *http.Request, account *store.Account) {
 	// 使用最新的 Chrome User-Agent (2026)
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
 
@@ -715,8 +715,16 @@ func (h *ProxyHandler) setWebHeaders(req *http.Request, session *store.Session) 
 	req.Header.Set("Origin", h.webURL)
 	req.Header.Set("Referer", h.webURL+"/")
 
-	// Cookie 必须在最后设置
-	req.Header.Set("Cookie", fmt.Sprintf("sessionKey=%s", session.SessionKey))
+	// Set authentication based on account type
+	if account.IsOAuth() {
+		// OAuth accounts use Bearer token
+		req.Header.Set("Authorization", "Bearer "+account.Credentials.AccessToken)
+		// Add OAuth beta flag if available
+		req.Header.Set("anthropic-beta", "oauth-2025-04-20")
+	} else {
+		// Session key accounts use Cookie
+		req.Header.Set("Cookie", fmt.Sprintf("sessionKey=%s", account.Credentials.SessionKey))
+	}
 }
 
 // ListModels returns available models (OpenAI-compatible)
