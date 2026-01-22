@@ -1,4 +1,21 @@
-# Build stage
+# Frontend build stage
+FROM node:20-alpine AS frontend-builder
+
+WORKDIR /app/web
+
+# Copy package files
+COPY web/package*.json ./
+
+# Install dependencies
+RUN npm ci
+
+# Copy frontend source
+COPY web/ ./
+
+# Build frontend
+RUN npm run build
+
+# Backend build stage
 FROM golang:1.21-alpine AS builder
 
 # Install build dependencies
@@ -14,6 +31,9 @@ RUN go mod download
 
 # Copy source code
 COPY . .
+
+# Copy built frontend from frontend-builder
+COPY --from=frontend-builder /app/web/dist ./web/dist
 
 # Build the binary
 RUN CGO_ENABLED=1 GOOS=linux go build -a -ldflags '-linkmode external -extldflags "-static"' -o ccproxy ./cmd/server

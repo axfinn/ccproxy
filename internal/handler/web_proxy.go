@@ -28,7 +28,8 @@ func NewWebProxyHandler(store *store.Store, webURL string) *WebProxyHandler {
 		store:  store,
 		webURL: webURL,
 		httpClient: &http.Client{
-			Timeout: 5 * time.Minute,
+			// 增加超时以支持长时间对话和大文档处理
+			Timeout: 10 * time.Minute,
 		},
 	}
 }
@@ -284,12 +285,33 @@ func (h *WebProxyHandler) DeleteConversation(c *gin.Context) {
 }
 
 func (h *WebProxyHandler) setWebHeaders(req *http.Request, session *store.Session) {
-	req.Header.Set("Cookie", fmt.Sprintf("sessionKey=%s", session.SessionKey))
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+	// 使用最新的 Chrome User-Agent (2026)
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+
+	// 现代浏览器的 Client Hints
+	req.Header.Set("Sec-Ch-Ua", `"Chromium";v="131", "Not_A Brand";v="24"`)
+	req.Header.Set("Sec-Ch-Ua-Mobile", "?0")
+	req.Header.Set("Sec-Ch-Ua-Platform", `"macOS"`)
+
+	// 安全相关头
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	req.Header.Set("Sec-Fetch-Mode", "cors")
+	req.Header.Set("Sec-Fetch-Dest", "empty")
+
+	// 标准请求头
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7")
+	// Don't request compression for SSE streams - we need to parse line by line
+	// req.Header.Set("Accept-Encoding", "gzip, deflate, br, zstd")
+	req.Header.Set("Cache-Control", "no-cache")
+	req.Header.Set("Pragma", "no-cache")
+
+	// Origin 和 Referer
 	req.Header.Set("Origin", h.webURL)
 	req.Header.Set("Referer", h.webURL+"/")
+
+	// Cookie 必须在最后设置
+	req.Header.Set("Cookie", fmt.Sprintf("sessionKey=%s", session.SessionKey))
 }
 
 // ProxyGeneric proxies any request to claude.ai (for unsupported endpoints)

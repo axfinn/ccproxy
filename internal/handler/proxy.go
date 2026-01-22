@@ -35,7 +35,9 @@ func NewProxyHandler(store *store.Store, keyPool *loadbalancer.KeyPool, webURL, 
 		webURL:  webURL,
 		apiURL:  apiURL,
 		httpClient: &http.Client{
-			Timeout: 5 * time.Minute,
+			// 增加超时以支持慢模型（如 Opus）和大文档处理
+			// 参考 KiroGate: 非流式 900s, 流式读取 300s
+			Timeout: 10 * time.Minute,
 		},
 	}
 }
@@ -433,7 +435,14 @@ func (h *ProxyHandler) handleWebMode(c *gin.Context, req *OpenAIChatRequest) {
 		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to connect to claude.ai"})
 		return
 	}
-	createResp.Body.Close()
+	defer createResp.Body.Close()
+
+	if createResp.StatusCode != http.StatusOK && createResp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(createResp.Body)
+		log.Error().Int("status", createResp.StatusCode).Str("body", string(body)).Msg("failed to create conversation")
+		c.JSON(createResp.StatusCode, gin.H{"error": "failed to create conversation", "details": string(body)})
+		return
+	}
 
 	// Send message
 	msgPayload := map[string]interface{}{
@@ -492,22 +501,67 @@ func (h *ProxyHandler) handleWebResponse(c *gin.Context, resp *http.Response, mo
 	// Read and parse SSE to extract complete response
 	var content strings.Builder
 	scanner := bufio.NewScanner(resp.Body)
+	buf := make([]byte, 0, 64*1024)
+	scanner.Buffer(buf, 1024*1024)
+
+	eventCount := 0
+	stopReason := "stop"
 
 	for scanner.Scan() {
 		line := scanner.Text()
+		if line == "" {
+			continue // Skip empty lines
+		}
+
+		eventCount++
+		log.Debug().Str("line", line).Int("event", eventCount).Msg("SSE event")
+
 		if strings.HasPrefix(line, "data: ") {
 			data := strings.TrimPrefix(line, "data: ")
+
+			// Handle special [DONE] marker
+			if data == "[DONE]" {
+				break
+			}
+
 			var event map[string]interface{}
 			if err := json.Unmarshal([]byte(data), &event); err != nil {
+				log.Debug().Err(err).Str("data", data).Msg("failed to unmarshal SSE event")
 				continue
 			}
-			if completion, ok := event["completion"].(string); ok {
+
+			log.Debug().Interface("event", event).Msg("parsed SSE event")
+
+			// Extract completion text
+			if completion, ok := event["completion"].(string); ok && completion != "" {
 				content.WriteString(completion)
+			}
+
+			// Extract stop reason if present
+			if reason, ok := event["stop_reason"].(string); ok && reason != "" {
+				stopReason = reason
+				if reason == "max_tokens" {
+					stopReason = "length"
+				}
 			}
 		}
 	}
 
-	finishReason := "stop"
+	if err := scanner.Err(); err != nil {
+		log.Error().Err(err).Msg("scanner error reading SSE stream")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to read stream"})
+		return
+	}
+
+	log.Info().Int("events", eventCount).Int("content_length", content.Len()).Msg("finished reading web response")
+
+	// Check if we got any content
+	if content.Len() == 0 {
+		log.Warn().Msg("no content received from claude.ai")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "no response content"})
+		return
+	}
+
 	openaiResp := &OpenAIChatResponse{
 		ID:      "chatcmpl-" + uuid.New().String()[:8],
 		Object:  "chat.completion",
@@ -520,7 +574,7 @@ func (h *ProxyHandler) handleWebResponse(c *gin.Context, resp *http.Response, mo
 					Role:    "assistant",
 					Content: content.String(),
 				},
-				FinishReason: &finishReason,
+				FinishReason: &stopReason,
 			},
 		},
 	}
@@ -535,20 +589,44 @@ func (h *ProxyHandler) streamWebResponse(c *gin.Context, resp *http.Response, mo
 	c.Status(http.StatusOK)
 
 	scanner := bufio.NewScanner(resp.Body)
+	buf := make([]byte, 0, 64*1024)
+	scanner.Buffer(buf, 1024*1024)
 	responseID := "chatcmpl-" + uuid.New().String()[:8]
+
+	defer func() {
+		// Always send [DONE] at the end
+		fmt.Fprintf(c.Writer, "data: [DONE]\n\n")
+		c.Writer.Flush()
+	}()
 
 	for scanner.Scan() {
 		line := scanner.Text()
+		if line == "" {
+			continue // Skip empty lines
+		}
+
+		log.Debug().Str("line", line).Msg("streaming SSE event")
+
 		if !strings.HasPrefix(line, "data: ") {
 			continue
 		}
 
 		data := strings.TrimPrefix(line, "data: ")
+
+		// Handle special [DONE] marker
+		if data == "[DONE]" {
+			break
+		}
+
 		var event map[string]interface{}
 		if err := json.Unmarshal([]byte(data), &event); err != nil {
+			log.Debug().Err(err).Str("data", data).Msg("failed to unmarshal streaming SSE event")
 			continue
 		}
 
+		log.Debug().Interface("event", event).Msg("parsed streaming SSE event")
+
+		// Send completion chunks
 		if completion, ok := event["completion"].(string); ok && completion != "" {
 			chunk := OpenAIChatResponse{
 				ID:      responseID,
@@ -570,8 +648,12 @@ func (h *ProxyHandler) streamWebResponse(c *gin.Context, resp *http.Response, mo
 			c.Writer.Flush()
 		}
 
+		// Send finish reason when stop_reason is present
 		if stopReason, ok := event["stop_reason"].(string); ok && stopReason != "" {
 			finishReason := "stop"
+			if stopReason == "max_tokens" {
+				finishReason = "length"
+			}
 			chunk := OpenAIChatResponse{
 				ID:      responseID,
 				Object:  "chat.completion.chunk",
@@ -588,20 +670,53 @@ func (h *ProxyHandler) streamWebResponse(c *gin.Context, resp *http.Response, mo
 			chunkJSON, _ := json.Marshal(chunk)
 			fmt.Fprintf(c.Writer, "data: %s\n\n", chunkJSON)
 			c.Writer.Flush()
+			break
 		}
 	}
 
-	fmt.Fprintf(c.Writer, "data: [DONE]\n\n")
-	c.Writer.Flush()
+	if err := scanner.Err(); err != nil {
+		log.Error().Err(err).Msg("scanner error in stream")
+		// Send error event
+		errorChunk := map[string]interface{}{
+			"error": map[string]interface{}{
+				"message": "stream read error",
+				"type":    "stream_error",
+			},
+		}
+		errorJSON, _ := json.Marshal(errorChunk)
+		fmt.Fprintf(c.Writer, "data: %s\n\n", errorJSON)
+		c.Writer.Flush()
+	}
 }
 
 func (h *ProxyHandler) setWebHeaders(req *http.Request, session *store.Session) {
-	req.Header.Set("Cookie", fmt.Sprintf("sessionKey=%s", session.SessionKey))
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+	// 使用最新的 Chrome User-Agent (2026)
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+
+	// 现代浏览器的 Client Hints
+	req.Header.Set("Sec-Ch-Ua", `"Chromium";v="131", "Not_A Brand";v="24"`)
+	req.Header.Set("Sec-Ch-Ua-Mobile", "?0")
+	req.Header.Set("Sec-Ch-Ua-Platform", `"macOS"`)
+
+	// 安全相关头
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	req.Header.Set("Sec-Fetch-Mode", "cors")
+	req.Header.Set("Sec-Fetch-Dest", "empty")
+
+	// 标准请求头
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7")
+	// Don't request compression for SSE streams - we need to parse line by line
+	// req.Header.Set("Accept-Encoding", "gzip, deflate, br, zstd")
+	req.Header.Set("Cache-Control", "no-cache")
+	req.Header.Set("Pragma", "no-cache")
+
+	// Origin 和 Referer
 	req.Header.Set("Origin", h.webURL)
 	req.Header.Set("Referer", h.webURL+"/")
+
+	// Cookie 必须在最后设置
+	req.Header.Set("Cookie", fmt.Sprintf("sessionKey=%s", session.SessionKey))
 }
 
 // ListModels returns available models (OpenAI-compatible)

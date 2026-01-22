@@ -25,7 +25,8 @@ func NewAPIProxyHandler(keyPool *loadbalancer.KeyPool, apiURL string) *APIProxyH
 		keyPool: keyPool,
 		apiURL:  apiURL,
 		httpClient: &http.Client{
-			Timeout: 5 * time.Minute,
+			// 增加超时以支持慢模型（Opus）和大文档处理
+			Timeout: 10 * time.Minute,
 		},
 	}
 }
@@ -91,6 +92,14 @@ func (h *APIProxyHandler) proxyRequest(c *gin.Context, path string) {
 	req.Header.Set("anthropic-version", "2023-06-01")
 	if req.Header.Get("Content-Type") == "" {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	// 添加标准 User-Agent 避免被识别为异常客户端
+	if req.Header.Get("User-Agent") == "" {
+		req.Header.Set("User-Agent", "anthropic-sdk-go/0.1.0")
+	}
+	// 添加 Accept-Encoding
+	if req.Header.Get("Accept-Encoding") == "" {
+		req.Header.Set("Accept-Encoding", "gzip, deflate, br")
 	}
 
 	// Execute request

@@ -1,4 +1,4 @@
-.PHONY: build run clean test docker-build docker-run docker-stop docker-logs docker-push
+.PHONY: build run clean test docker-build docker-run docker-stop docker-logs docker-push build-web dev-web
 
 # Variables
 APP_NAME := ccproxy
@@ -9,8 +9,20 @@ DOCKER_TAG := $(VERSION)
 # Go build flags
 LDFLAGS := -ldflags "-X main.Version=$(VERSION)"
 
-# Build the binary
-build:
+# Build the web frontend
+build-web:
+	cd web && npm install && npm run build
+
+# Run web frontend in development mode
+dev-web:
+	cd web && npm run dev
+
+# Build the binary (includes frontend if dist exists)
+build: build-web
+	CGO_ENABLED=1 go build $(LDFLAGS) -o $(APP_NAME) ./cmd/server
+
+# Build Go only (without rebuilding frontend)
+build-go:
 	CGO_ENABLED=1 go build $(LDFLAGS) -o $(APP_NAME) ./cmd/server
 
 # Run locally
@@ -21,6 +33,7 @@ run: build
 clean:
 	rm -f $(APP_NAME)
 	rm -f *.db
+	rm -rf web/dist web/node_modules
 
 # Run tests
 test:
@@ -81,7 +94,10 @@ health:
 # Help
 help:
 	@echo "Available targets:"
-	@echo "  build         - Build the binary"
+	@echo "  build         - Build the binary with frontend"
+	@echo "  build-go      - Build the binary without rebuilding frontend"
+	@echo "  build-web     - Build the web frontend only"
+	@echo "  dev-web       - Run web frontend in development mode"
 	@echo "  run           - Build and run locally"
 	@echo "  clean         - Clean build artifacts"
 	@echo "  test          - Run tests"

@@ -19,11 +19,13 @@ import (
 	"ccproxy/internal/middleware"
 	"ccproxy/internal/store"
 	"ccproxy/pkg/jwt"
+	"ccproxy/web"
 )
 
 func main() {
 	// Setup logging
 	zerolog.TimeFieldFormat = zerolog.TimeFormatUnix
+	zerolog.SetGlobalLevel(zerolog.DebugLevel) // Enable debug logging
 	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr})
 
 	// Load configuration
@@ -117,7 +119,6 @@ func main() {
 
 		// Native Anthropic API proxy
 		v1.POST("/messages", apiProxyHandler.Messages)
-		v1.Any("/*path", apiProxyHandler.ProxyAny)
 	}
 
 	// Web mode routes (direct claude.ai proxy)
@@ -130,7 +131,15 @@ func main() {
 		webRoutes.GET("/conversations/:conversation_id", webProxyHandler.GetConversation)
 		webRoutes.DELETE("/conversations/:conversation_id", webProxyHandler.DeleteConversation)
 		webRoutes.POST("/conversations/:conversation_id/completion", webProxyHandler.SendMessage)
-		webRoutes.Any("/*path", webProxyHandler.ProxyGeneric)
+	}
+
+	// Admin UI (embedded SPA)
+	adminUI, err := handler.NewAdminUIHandler(web.DistFS, "dist")
+	if err != nil {
+		log.Warn().Err(err).Msg("failed to initialize admin UI, skipping")
+	} else {
+		adminUI.RegisterRoutes(router)
+		log.Info().Msg("admin UI available at /admin/")
 	}
 
 	// Start server
