@@ -78,15 +78,34 @@ func NewEnhancedProxyHandler(cfg EnhancedProxyConfig) *EnhancedProxyHandler {
 
 // ChatCompletions handles OpenAI-compatible chat completions with enhanced features
 func (h *EnhancedProxyHandler) ChatCompletions(c *gin.Context) {
+	rawBody, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "failed to read request body"})
+		return
+	}
+	filteredBody := FilterThinkingBlocks(rawBody)
+	c.Request.Body = io.NopCloser(bytes.NewBuffer(filteredBody))
+
 	var req OpenAIChatRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
+	if err := json.Unmarshal(filteredBody, &req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	// Get user info from context
+	// Validate request has messages
+	if len(req.Messages) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "messages cannot be empty"})
+		return
+	}
+
+	// Get user info from context (token), fallback to metadata.user_id
 	userID, _ := c.Get(middleware.ContextKeyTokenID)
 	userIDStr, _ := userID.(string)
+	if userIDStr == "" {
+		if uid, ok := req.Metadata["user_id"].(string); ok && uid != "" {
+			userIDStr = uid
+		}
+	}
 
 	// Start metrics tracking
 	mode := h.determineMode(c)
@@ -232,9 +251,9 @@ func (h *EnhancedProxyHandler) handleWebModeEnhanced(c *gin.Context, req *OpenAI
 	}
 	for _, msg := range req.Messages {
 		if msg.Role == "system" && stickyOpts.SystemPrompt == "" {
-			stickyOpts.SystemPrompt = msg.Content
+			stickyOpts.SystemPrompt = extractTextFromContent(msg.Content)
 		} else if msg.Role == "user" && len(stickyOpts.Messages) == 0 {
-			stickyOpts.Messages = append(stickyOpts.Messages, msg.Content)
+			stickyOpts.Messages = append(stickyOpts.Messages, extractTextFromContent(msg.Content))
 		}
 	}
 	sessionHash := scheduler.GenerateStickyHash(stickyOpts)
@@ -467,7 +486,7 @@ func (h *EnhancedProxyHandler) convertToAnthropic(req *OpenAIChatRequest) *Anthr
 			if anthropicReq.System != "" {
 				anthropicReq.System += "\n"
 			}
-			anthropicReq.System += msg.Content
+			anthropicReq.System += extractTextFromContent(msg.Content)
 		} else {
 			role := msg.Role
 			if role == "assistant" {
@@ -477,7 +496,7 @@ func (h *EnhancedProxyHandler) convertToAnthropic(req *OpenAIChatRequest) *Anthr
 			}
 			anthropicReq.Messages = append(anthropicReq.Messages, AnthropicMessage{
 				Role:    role,
-				Content: msg.Content,
+				Content: msg.Content, // Keep original format (string or []any)
 			})
 		}
 	}
@@ -490,11 +509,11 @@ func (h *EnhancedProxyHandler) buildPromptFromMessages(messages []OpenAIMessage)
 	for _, msg := range messages {
 		switch msg.Role {
 		case "system":
-			parts = append(parts, fmt.Sprintf("[System: %s]", msg.Content))
+			parts = append(parts, fmt.Sprintf("[System: %s]", extractTextFromContent(msg.Content)))
 		case "user":
-			parts = append(parts, msg.Content)
+			parts = append(parts, extractTextFromContent(msg.Content))
 		case "assistant":
-			parts = append(parts, fmt.Sprintf("[Assistant: %s]", msg.Content))
+			parts = append(parts, fmt.Sprintf("[Assistant: %s]", extractTextFromContent(msg.Content)))
 		}
 	}
 	return strings.Join(parts, "\n\n")
@@ -1003,7 +1022,7 @@ func (h *EnhancedProxyHandler) handleMessagesWeb(c *gin.Context, req *AnthropicR
 	}
 	for _, msg := range req.Messages {
 		if msg.Role == "user" && len(stickyOpts.Messages) == 0 {
-			stickyOpts.Messages = append(stickyOpts.Messages, msg.Content)
+			stickyOpts.Messages = append(stickyOpts.Messages, extractTextFromContent(msg.Content))
 		}
 	}
 	sessionHash := scheduler.GenerateStickyHash(stickyOpts)

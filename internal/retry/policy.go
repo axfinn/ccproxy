@@ -76,8 +76,11 @@ func (p *defaultPolicy) ShouldRetry(err error, resp *http.Response, attempt int)
 		resp.StatusCode == http.StatusServiceUnavailable,
 		resp.StatusCode == http.StatusGatewayTimeout:
 		return true
+	case resp.StatusCode == http.StatusBadRequest:
+		// 400 Bad Request (e.g., parse errors) should NOT retry or switch
+		return false
 	default:
-		// Client errors (4xx) are not retryable
+		// Other client errors (4xx) are not retryable
 		return false
 	}
 }
@@ -105,6 +108,9 @@ func (p *defaultPolicy) ShouldSwitchAccount(err error, resp *http.Response) bool
 	case http.StatusServiceUnavailable:
 		// Service unavailable might be account-specific
 		return true
+	case http.StatusBadRequest:
+		// 400 Bad Request should NOT switch (likely client error)
+		return false
 	default:
 		return false
 	}
