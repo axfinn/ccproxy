@@ -27,6 +27,16 @@ build-go:
 
 # Run locally
 run: build
+	@if [ -z "$$CCPROXY_JWT_SECRET" ]; then \
+		echo "Setting default CCPROXY_JWT_SECRET for development"; \
+		export CCPROXY_JWT_SECRET="dev-secret-change-in-production"; \
+	fi; \
+	if [ -z "$$CCPROXY_ADMIN_KEY" ]; then \
+		echo "Setting default CCPROXY_ADMIN_KEY for development"; \
+		export CCPROXY_ADMIN_KEY="dev-admin-key"; \
+	fi; \
+	CCPROXY_JWT_SECRET=$${CCPROXY_JWT_SECRET:-dev-secret-change-in-production} \
+	CCPROXY_ADMIN_KEY=$${CCPROXY_ADMIN_KEY:-dev-admin-key} \
 	./$(APP_NAME)
 
 # Clean build artifacts

@@ -481,12 +481,10 @@ func (h *EnhancedProxyHandler) convertToAnthropic(req *OpenAIChatRequest) *Anthr
 	}
 
 	// Convert messages and extract system prompt
+	var systemText string
 	for _, msg := range req.Messages {
 		if msg.Role == "system" {
-			if anthropicReq.System != "" {
-				anthropicReq.System += "\n"
-			}
-			anthropicReq.System += extractTextFromContent(msg.Content)
+			systemText = appendToSystem(systemText, extractTextFromContent(msg.Content))
 		} else {
 			role := msg.Role
 			if role == "assistant" {
@@ -499,6 +497,10 @@ func (h *EnhancedProxyHandler) convertToAnthropic(req *OpenAIChatRequest) *Anthr
 				Content: msg.Content, // Keep original format (string or []any)
 			})
 		}
+	}
+
+	if systemText != "" {
+		anthropicReq.System = systemText
 	}
 
 	return anthropicReq
@@ -1018,7 +1020,7 @@ func (h *EnhancedProxyHandler) handleMessagesWeb(c *gin.Context, req *AnthropicR
 	// Generate sticky session hash
 	stickyOpts := scheduler.StickyHashOptions{
 		UserID:       userID,
-		SystemPrompt: req.System,
+		SystemPrompt: extractTextFromContent(req.System),
 	}
 	for _, msg := range req.Messages {
 		if msg.Role == "user" && len(stickyOpts.Messages) == 0 {

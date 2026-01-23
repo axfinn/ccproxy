@@ -108,6 +108,7 @@ func (s *OAuthService) getOrganizationUUID(sessionKey, proxyURL string) (string,
 	log.Info().Str("url", targetURL).Msg("[OAuth] Step 1: Getting organization UUID")
 
 	resp, err := client.R().
+		SetContext(context.Background()).
 		SetCookies(&http.Cookie{
 			Name:  "sessionKey",
 			Value: sessionKey,
@@ -177,6 +178,7 @@ func (s *OAuthService) getAuthorizationCode(sessionKey, orgUUID, proxyURL string
 	}
 
 	resp, err := client.R().
+		SetContext(context.Background()).
 		SetCookies(&http.Cookie{
 			Name:  "sessionKey",
 			Value: sessionKey,

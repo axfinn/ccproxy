@@ -88,7 +88,7 @@ type AnthropicRequest struct {
 	TopP          float64            `json:"top_p,omitempty"`
 	Stream        bool               `json:"stream,omitempty"`
 	StopSequences []string           `json:"stop_sequences,omitempty"`
-	System        string             `json:"system,omitempty"`
+	System        interface{}        `json:"system,omitempty"` // Can be string or []any for system blocks
 }
 
 type AnthropicMessage struct {
@@ -119,6 +119,18 @@ func extractTextFromContent(content interface{}) string {
 	default:
 		return ""
 	}
+}
+
+// appendToSystem 向 system 字段追加文本，处理 interface{} 类型
+func appendToSystem(system interface{}, text string) string {
+	if text == "" {
+		return extractTextFromContent(system)
+	}
+	existing := extractTextFromContent(system)
+	if existing == "" {
+		return text
+	}
+	return existing + "\n" + text
 }
 
 // FilterThinkingBlocks removes invalid thinking blocks; fail-safe returns original body on errors.
@@ -648,12 +660,10 @@ func (h *ProxyHandler) convertToAnthropic(req *OpenAIChatRequest) *AnthropicRequ
 	}
 
 	// Convert messages and extract system prompt
+	var systemText string
 	for _, msg := range req.Messages {
 		if msg.Role == "system" {
-			if anthropicReq.System != "" {
-				anthropicReq.System += "\n"
-			}
-			anthropicReq.System += extractTextFromContent(msg.Content)
+			systemText = appendToSystem(systemText, extractTextFromContent(msg.Content))
 		} else {
 			role := msg.Role
 			if role == "assistant" {
@@ -666,6 +676,10 @@ func (h *ProxyHandler) convertToAnthropic(req *OpenAIChatRequest) *AnthropicRequ
 				Content: msg.Content, // Keep original format (string or []any)
 			})
 		}
+	}
+
+	if systemText != "" {
+		anthropicReq.System = systemText
 	}
 
 	return anthropicReq
