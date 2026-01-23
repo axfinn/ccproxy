@@ -65,6 +65,53 @@ ccproxy is a Go proxy service for Claude with dual-mode support (Web mode via cl
 
 **Configuration:** Uses Viper with `CCPROXY_` prefix for env vars. Required: `CCPROXY_JWT_SECRET`, `CCPROXY_ADMIN_KEY`. For API mode: `CCPROXY_CLAUDE_API_KEYS`.
 
+## Claude Code Client Configuration
+
+```bash
+# Required environment variables
+export ANTHROPIC_AUTH_TOKEN="your-jwt-token"
+export CLAUDE_API_BASE_URL="http://localhost:8080"   # No /v1 suffix!
+```
+
+Or in `~/.claude/settings.json`:
+```json
+{
+  "apiBaseUrl": "http://localhost:8080",
+  "authToken": "your-jwt-token"
+}
+```
+
+**Important:** `CLAUDE_API_BASE_URL` should NOT include `/v1` - the proxy adds it automatically.
+
+## Recent Updates (2026-01-23)
+
+### OAuth with Chrome TLS Fingerprint
+
+Updated OAuth service to use `imroc/req/v3` library with `ImpersonateChrome()` for bypassing Cloudflare detection.
+
+**Key Changes:**
+- Uses correct OAuth constants (ClientID, TokenURL, RedirectURI) from official Claude implementation
+- Automatic system proxy detection from environment variables (`HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`)
+- Support for manual proxy URL in OAuth requests
+
+**OAuth Request with Proxy:**
+```bash
+curl -X POST http://localhost:8080/api/account/oauth \
+  -H "X-Admin-Key: your-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "my-account",
+    "session_key": "sk-ant-sid01-xxx",
+    "proxy_url": "http://127.0.0.1:7890"
+  }'
+```
+
+**Files Modified:**
+- `internal/service/oauth.go` - Rewritten with imroc/req and correct OAuth flow
+- `cmd/server/main.go` - Added event_logging endpoint, fixed double /v1 path handling
+
+---
+
 ## Recent Updates (2026-01-22)
 
 ### OAuth Account Management (Latest)

@@ -61,6 +61,19 @@ func (s *Store) migrate() error {
 		`CREATE INDEX IF NOT EXISTS idx_tokens_expires_at ON tokens(expires_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_tokens_revoked_at ON tokens(revoked_at)`,
 
+		// Legacy sessions table (kept for backward compatibility)
+		`CREATE TABLE IF NOT EXISTS sessions (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			session_key TEXT NOT NULL,
+			organization_id TEXT,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			expires_at DATETIME,
+			last_used_at DATETIME,
+			is_active BOOLEAN DEFAULT 1
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_sessions_is_active ON sessions(is_active)`,
+
 		// New accounts table for OAuth support
 		`CREATE TABLE IF NOT EXISTS accounts (
 			id TEXT PRIMARY KEY,

@@ -2,7 +2,6 @@ package handler
 
 import (
 	"bufio"
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,8 +11,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/imroc/req/v3"
 	"github.com/rs/zerolog/log"
 
+	"ccproxy/internal/httpclient"
 	"ccproxy/internal/loadbalancer"
 	"ccproxy/internal/middleware"
 	"ccproxy/internal/store"
@@ -21,24 +22,20 @@ import (
 
 // ProxyHandler handles unified proxy requests with OpenAI-compatible interface
 type ProxyHandler struct {
-	store      *store.Store
-	keyPool    *loadbalancer.KeyPool
-	webURL     string
-	apiURL     string
-	httpClient *http.Client
+	store     *store.Store
+	keyPool   *loadbalancer.KeyPool
+	webURL    string
+	apiURL    string
+	reqClient *req.Client
 }
 
 func NewProxyHandler(store *store.Store, keyPool *loadbalancer.KeyPool, webURL, apiURL string) *ProxyHandler {
 	return &ProxyHandler{
-		store:   store,
-		keyPool: keyPool,
-		webURL:  webURL,
-		apiURL:  apiURL,
-		httpClient: &http.Client{
-			// 增加超时以支持慢模型（如 Opus）和大文档处理
-			// 参考 KiroGate: 非流式 900s, 流式读取 300s
-			Timeout: 10 * time.Minute,
-		},
+		store:     store,
+		keyPool:   keyPool,
+		webURL:    webURL,
+		apiURL:    apiURL,
+		reqClient: httpclient.GetClient(),
 	}
 }
 
@@ -175,7 +172,7 @@ func (h *ProxyHandler) determineMode(c *gin.Context) string {
 	return "web"
 }
 
-func (h *ProxyHandler) handleAPIMode(c *gin.Context, req *OpenAIChatRequest) {
+func (h *ProxyHandler) handleAPIMode(c *gin.Context, openaiReq *OpenAIChatRequest) {
 	apiKey := h.keyPool.Get()
 	if apiKey == "" {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "no API keys available"})
@@ -183,21 +180,22 @@ func (h *ProxyHandler) handleAPIMode(c *gin.Context, req *OpenAIChatRequest) {
 	}
 
 	// Convert OpenAI format to Anthropic format
-	anthropicReq := h.convertToAnthropic(req)
+	anthropicReq := h.convertToAnthropic(openaiReq)
 	payloadBytes, _ := json.Marshal(anthropicReq)
 
 	targetURL := h.apiURL + "/v1/messages"
-	httpReq, err := http.NewRequest("POST", targetURL, bytes.NewReader(payloadBytes))
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create request"})
-		return
-	}
 
-	httpReq.Header.Set("x-api-key", apiKey)
-	httpReq.Header.Set("anthropic-version", "2023-06-01")
-	httpReq.Header.Set("Content-Type", "application/json")
+	r := h.reqClient.R().
+		SetContext(c.Request.Context()).
+		SetBodyBytes(payloadBytes).
+		SetHeader("x-api-key", apiKey).
+		SetHeader("anthropic-version", "2023-06-01").
+		SetHeader("Content-Type", "application/json")
 
-	resp, err := h.httpClient.Do(httpReq)
+	// Enable streaming for response
+	r.DisableAutoReadResponse()
+
+	resp, err := r.Post(targetURL)
 	if err != nil {
 		h.keyPool.ReportError(apiKey)
 		log.Error().Err(err).Msg("failed to call Anthropic API")
@@ -212,10 +210,10 @@ func (h *ProxyHandler) handleAPIMode(c *gin.Context, req *OpenAIChatRequest) {
 		h.keyPool.ReportError(apiKey)
 	}
 
-	if req.Stream {
-		h.streamAPIResponse(c, resp, req.Model)
+	if openaiReq.Stream {
+		h.streamAPIResponse(c, resp, openaiReq.Model)
 	} else {
-		h.handleAPIResponse(c, resp, req.Model)
+		h.handleAPIResponse(c, resp, openaiReq.Model)
 	}
 }
 
@@ -260,7 +258,7 @@ func (h *ProxyHandler) convertToAnthropic(req *OpenAIChatRequest) *AnthropicRequ
 	return anthropicReq
 }
 
-func (h *ProxyHandler) handleAPIResponse(c *gin.Context, resp *http.Response, model string) {
+func (h *ProxyHandler) handleAPIResponse(c *gin.Context, resp *req.Response, model string) {
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		c.Data(resp.StatusCode, "application/json", body)
@@ -314,7 +312,7 @@ func (h *ProxyHandler) convertToOpenAI(resp *AnthropicResponse, model string) *O
 	}
 }
 
-func (h *ProxyHandler) streamAPIResponse(c *gin.Context, resp *http.Response, model string) {
+func (h *ProxyHandler) streamAPIResponse(c *gin.Context, resp *req.Response, model string) {
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		c.Data(resp.StatusCode, "application/json", body)
@@ -403,7 +401,7 @@ func (h *ProxyHandler) streamAPIResponse(c *gin.Context, resp *http.Response, mo
 	}
 }
 
-func (h *ProxyHandler) handleWebMode(c *gin.Context, req *OpenAIChatRequest) {
+func (h *ProxyHandler) handleWebMode(c *gin.Context, openaiReq *OpenAIChatRequest) {
 	account, err := h.store.GetActiveAccount()
 	if err != nil || account == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "no active account available"})
@@ -415,7 +413,7 @@ func (h *ProxyHandler) handleWebMode(c *gin.Context, req *OpenAIChatRequest) {
 	// 2. Send the message and get response
 
 	// Build prompt from messages
-	prompt := h.buildPromptFromMessages(req.Messages)
+	prompt := h.buildPromptFromMessages(openaiReq.Messages)
 
 	// Create conversation
 	convUUID := uuid.New().String()
@@ -426,21 +424,22 @@ func (h *ProxyHandler) handleWebMode(c *gin.Context, req *OpenAIChatRequest) {
 	createPayloadBytes, _ := json.Marshal(createPayload)
 
 	createURL := fmt.Sprintf("%s/api/organizations/%s/chat_conversations", h.webURL, account.OrganizationID)
-	createReq, _ := http.NewRequest("POST", createURL, bytes.NewReader(createPayloadBytes))
-	h.setWebHeaders(createReq, account)
-	createReq.Header.Set("Content-Type", "application/json")
 
-	createResp, err := h.httpClient.Do(createReq)
+	r := h.reqClient.R().
+		SetContext(c.Request.Context()).
+		SetBodyBytes(createPayloadBytes)
+	h.setReqHeaders(r, account)
+	r.SetHeader("Content-Type", "application/json")
+
+	createResp, err := r.Post(createURL)
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to connect to claude.ai"})
 		return
 	}
-	defer createResp.Body.Close()
 
 	if createResp.StatusCode != http.StatusOK && createResp.StatusCode != http.StatusCreated {
-		body, _ := io.ReadAll(createResp.Body)
-		log.Error().Int("status", createResp.StatusCode).Str("body", string(body)).Msg("failed to create conversation")
-		c.JSON(createResp.StatusCode, gin.H{"error": "failed to create conversation", "details": string(body)})
+		log.Error().Int("status", createResp.StatusCode).Str("body", createResp.String()).Msg("failed to create conversation")
+		c.JSON(createResp.StatusCode, gin.H{"error": "failed to create conversation", "details": createResp.String()})
 		return
 	}
 
@@ -455,12 +454,18 @@ func (h *ProxyHandler) handleWebMode(c *gin.Context, req *OpenAIChatRequest) {
 
 	msgURL := fmt.Sprintf("%s/api/organizations/%s/chat_conversations/%s/completion",
 		h.webURL, account.OrganizationID, convUUID)
-	msgReq, _ := http.NewRequest("POST", msgURL, bytes.NewReader(msgPayloadBytes))
-	h.setWebHeaders(msgReq, account)
-	msgReq.Header.Set("Content-Type", "application/json")
-	msgReq.Header.Set("Accept", "text/event-stream")
 
-	msgResp, err := h.httpClient.Do(msgReq)
+	msgR := h.reqClient.R().
+		SetContext(c.Request.Context()).
+		SetBodyBytes(msgPayloadBytes)
+	h.setReqHeaders(msgR, account)
+	msgR.SetHeader("Content-Type", "application/json")
+	msgR.SetHeader("Accept", "text/event-stream")
+
+	// Enable streaming response
+	msgR.DisableAutoReadResponse()
+
+	msgResp, err := msgR.Post(msgURL)
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to connect to claude.ai"})
 		return
@@ -475,10 +480,10 @@ func (h *ProxyHandler) handleWebMode(c *gin.Context, req *OpenAIChatRequest) {
 		return
 	}
 
-	if req.Stream {
-		h.streamWebResponse(c, msgResp, req.Model)
+	if openaiReq.Stream {
+		h.streamWebResponse(c, msgResp, openaiReq.Model)
 	} else {
-		h.handleWebResponse(c, msgResp, req.Model)
+		h.handleWebResponse(c, msgResp, openaiReq.Model)
 	}
 }
 
@@ -497,7 +502,7 @@ func (h *ProxyHandler) buildPromptFromMessages(messages []OpenAIMessage) string 
 	return strings.Join(parts, "\n\n")
 }
 
-func (h *ProxyHandler) handleWebResponse(c *gin.Context, resp *http.Response, model string) {
+func (h *ProxyHandler) handleWebResponse(c *gin.Context, resp *req.Response, model string) {
 	// Read and parse SSE to extract complete response
 	var content strings.Builder
 	scanner := bufio.NewScanner(resp.Body)
@@ -582,7 +587,7 @@ func (h *ProxyHandler) handleWebResponse(c *gin.Context, resp *http.Response, mo
 	c.JSON(http.StatusOK, openaiResp)
 }
 
-func (h *ProxyHandler) streamWebResponse(c *gin.Context, resp *http.Response, model string) {
+func (h *ProxyHandler) streamWebResponse(c *gin.Context, resp *req.Response, model string) {
 	c.Header("Content-Type", "text/event-stream")
 	c.Header("Cache-Control", "no-cache")
 	c.Header("Connection", "keep-alive")
@@ -689,41 +694,39 @@ func (h *ProxyHandler) streamWebResponse(c *gin.Context, resp *http.Response, mo
 	}
 }
 
-func (h *ProxyHandler) setWebHeaders(req *http.Request, account *store.Account) {
-	// 使用最新的 Chrome User-Agent (2026)
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+func (h *ProxyHandler) setReqHeaders(r *req.Request, account *store.Account) {
+	// Note: User-Agent and TLS fingerprint are already set by ImpersonateChrome()
+	// We only need to set additional headers
 
 	// 现代浏览器的 Client Hints
-	req.Header.Set("Sec-Ch-Ua", `"Chromium";v="131", "Not_A Brand";v="24"`)
-	req.Header.Set("Sec-Ch-Ua-Mobile", "?0")
-	req.Header.Set("Sec-Ch-Ua-Platform", `"macOS"`)
+	r.SetHeader("Sec-Ch-Ua", `"Chromium";v="131", "Not_A Brand";v="24"`)
+	r.SetHeader("Sec-Ch-Ua-Mobile", "?0")
+	r.SetHeader("Sec-Ch-Ua-Platform", `"macOS"`)
 
 	// 安全相关头
-	req.Header.Set("Sec-Fetch-Site", "same-origin")
-	req.Header.Set("Sec-Fetch-Mode", "cors")
-	req.Header.Set("Sec-Fetch-Dest", "empty")
+	r.SetHeader("Sec-Fetch-Site", "same-origin")
+	r.SetHeader("Sec-Fetch-Mode", "cors")
+	r.SetHeader("Sec-Fetch-Dest", "empty")
 
 	// 标准请求头
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Accept-Language", "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7")
-	// Don't request compression for SSE streams - we need to parse line by line
-	// req.Header.Set("Accept-Encoding", "gzip, deflate, br, zstd")
-	req.Header.Set("Cache-Control", "no-cache")
-	req.Header.Set("Pragma", "no-cache")
+	r.SetHeader("Accept", "application/json")
+	r.SetHeader("Accept-Language", "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7")
+	r.SetHeader("Cache-Control", "no-cache")
+	r.SetHeader("Pragma", "no-cache")
 
 	// Origin 和 Referer
-	req.Header.Set("Origin", h.webURL)
-	req.Header.Set("Referer", h.webURL+"/")
+	r.SetHeader("Origin", h.webURL)
+	r.SetHeader("Referer", h.webURL+"/")
 
 	// Set authentication based on account type
 	if account.IsOAuth() {
 		// OAuth accounts use Bearer token
-		req.Header.Set("Authorization", "Bearer "+account.Credentials.AccessToken)
+		r.SetHeader("Authorization", "Bearer "+account.Credentials.AccessToken)
 		// Add OAuth beta flag if available
-		req.Header.Set("anthropic-beta", "oauth-2025-04-20")
+		r.SetHeader("anthropic-beta", "oauth-2025-04-20")
 	} else {
 		// Session key accounts use Cookie
-		req.Header.Set("Cookie", fmt.Sprintf("sessionKey=%s", account.Credentials.SessionKey))
+		r.SetHeader("Cookie", fmt.Sprintf("sessionKey=%s", account.Credentials.SessionKey))
 	}
 }
 

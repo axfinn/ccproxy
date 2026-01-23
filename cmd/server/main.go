@@ -35,12 +35,25 @@ func main() {
 	// Setup logging
 	zerolog.TimeFieldFormat = zerolog.TimeFormatUnix
 	zerolog.SetGlobalLevel(zerolog.DebugLevel) // Enable debug logging
-	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr})
+
+	// Create log file
+	logFile, err := os.OpenFile("ccproxy.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		log.Fatal().Err(err).Msg("failed to open log file")
+	}
+	defer logFile.Close()
+
+	// Multi-writer: write to both console and file
+	multi := zerolog.MultiLevelWriter(
+		zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: "15:04:05"},
+		logFile,
+	)
+	log.Logger = log.Output(multi)
 
 	// Load configuration
-	cfg, err := config.Load()
-	if err != nil {
-		log.Fatal().Err(err).Msg("failed to load configuration")
+	cfg, err2 := config.Load()
+	if err2 != nil {
+		log.Fatal().Err(err2).Msg("failed to load configuration")
 	}
 
 	// Validate required configuration
@@ -207,6 +220,11 @@ func main() {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
 
+	// Event logging endpoint (Claude Code telemetry - no auth required, just ignore)
+	router.POST("/v1/api/event_logging/batch", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"success": true})
+	})
+
 	// Prometheus metrics endpoint
 	if metricsCollector != nil {
 		router.GET(cfg.Metrics.Path, metricsCollector.Handler())
@@ -281,8 +299,13 @@ func main() {
 		v1.POST("/chat/completions", enhancedProxyHandler.ChatCompletions)
 		v1.GET("/models", enhancedProxyHandler.ListModels)
 
-		// Native Anthropic API proxy (keep using API handler)
-		v1.POST("/messages", apiProxyHandler.Messages)
+		// Native Anthropic API proxy - now using enhanced handler for Web/API dual mode
+		v1.POST("/messages", enhancedProxyHandler.Messages)
+		v1.POST("/messages/count_tokens", apiProxyHandler.CountTokens)
+
+		// Handle double /v1/v1 paths (client has /v1 in base URL)
+		v1.POST("/v1/messages", enhancedProxyHandler.Messages)
+		v1.POST("/v1/messages/count_tokens", apiProxyHandler.CountTokens)
 	}
 
 	// Web mode routes (direct claude.ai proxy)

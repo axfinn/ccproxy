@@ -76,30 +76,28 @@ export function Docs() {
                   在 shell 配置文件（~/.bashrc, ~/.zshrc）中添加：
                 </p>
                 <pre className="bg-muted p-4 rounded-lg overflow-x-auto text-sm">
-                  <code>{`# ccproxy 配置
-export ANTHROPIC_BASE_URL="${baseURL}/v1"
-export ANTHROPIC_API_KEY="your_token_here"
+                  <code>{`# Claude Code 配置（推荐）
+export ANTHROPIC_AUTH_TOKEN="your_token_here"
+export CLAUDE_API_BASE_URL="${baseURL}"
 
-# 或者使用 Claude Code 环境变量
-export CLAUDE_API_BASE_URL="${baseURL}/v1"
-export CLAUDE_API_KEY="your_token_here"`}</code>
+# 或者使用 Anthropic SDK 环境变量
+export ANTHROPIC_BASE_URL="${baseURL}"
+export ANTHROPIC_API_KEY="your_token_here"`}</code>
                 </pre>
                 <p className="text-sm text-muted-foreground mt-2">
-                  保存后运行 <code className="bg-muted px-1 py-0.5 rounded">source ~/.zshrc</code> 或重启终端
+                  <strong>注意：</strong>URL 不要加 /v1 后缀！保存后运行 <code className="bg-muted px-1 py-0.5 rounded">source ~/.zshrc</code> 或重启终端
                 </p>
               </div>
 
               <div>
                 <h4 className="font-semibold mb-2">方法二: 使用配置文件</h4>
                 <p className="text-sm text-muted-foreground mb-3">
-                  创建或编辑 <code className="bg-muted px-1 py-0.5 rounded">~/.config/claude/config.json</code>：
+                  创建或编辑 <code className="bg-muted px-1 py-0.5 rounded">~/.claude/settings.json</code>：
                 </p>
                 <pre className="bg-muted p-4 rounded-lg overflow-x-auto text-sm">
                   <code>{`{
-  "api": {
-    "baseUrl": "${baseURL}/v1",
-    "key": "your_token_here"
-  }
+  "apiBaseUrl": "${baseURL}",
+  "authToken": "your_token_here"
 }`}</code>
                 </pre>
               </div>
@@ -169,39 +167,39 @@ curl ${baseURL}/v1/models \\
             <CardContent>
               <div className="space-y-4">
                 <div>
-                  <h4 className="font-semibold text-sm">ANTHROPIC_BASE_URL</h4>
+                  <h4 className="font-semibold text-sm">CLAUDE_API_BASE_URL（Claude Code 推荐）</h4>
                   <p className="text-sm text-muted-foreground mb-2">
-                    Anthropic API 的基础 URL（不包含 /v1）
+                    Claude Code 的 API 基础 URL（<strong>不要</strong>加 /v1）
                   </p>
                   <pre className="bg-muted p-3 rounded text-sm">
-                    <code>export ANTHROPIC_BASE_URL="{baseURL}/v1"</code>
+                    <code>export CLAUDE_API_BASE_URL="{baseURL}"</code>
                   </pre>
                 </div>
 
                 <div>
-                  <h4 className="font-semibold text-sm">ANTHROPIC_API_KEY</h4>
+                  <h4 className="font-semibold text-sm">ANTHROPIC_AUTH_TOKEN（Claude Code 推荐）</h4>
                   <p className="text-sm text-muted-foreground mb-2">
                     访问令牌（从令牌管理页面生成）
                   </p>
                   <pre className="bg-muted p-3 rounded text-sm">
-                    <code>export ANTHROPIC_API_KEY="your_token_here"</code>
+                    <code>export ANTHROPIC_AUTH_TOKEN="your_token_here"</code>
                   </pre>
                 </div>
 
                 <div>
-                  <h4 className="font-semibold text-sm">CLAUDE_API_BASE_URL / CLAUDE_API_KEY</h4>
+                  <h4 className="font-semibold text-sm">ANTHROPIC_BASE_URL / ANTHROPIC_API_KEY</h4>
                   <p className="text-sm text-muted-foreground mb-2">
-                    Claude Code 特定的环境变量（优先级高于 ANTHROPIC_*）
+                    Anthropic SDK 环境变量（也可用于 Claude Code）
                   </p>
                   <pre className="bg-muted p-3 rounded text-sm">
-                    <code>{`export CLAUDE_API_BASE_URL="${baseURL}/v1"
-export CLAUDE_API_KEY="your_token_here"`}</code>
+                    <code>{`export ANTHROPIC_BASE_URL="${baseURL}"
+export ANTHROPIC_API_KEY="your_token_here"`}</code>
                   </pre>
                 </div>
 
                 <Alert>
                   <AlertDescription>
-                    <strong>注意：</strong>BASE_URL 应该包含 /v1 后缀，因为 Claude Code 会直接拼接 /messages 等路径。
+                    <strong>重要：</strong>URL 不要加 /v1 后缀！代理会自动处理路径。
                   </AlertDescription>
                 </Alert>
               </div>
@@ -353,9 +351,18 @@ curl -X POST ${baseURL}/v1/chat/completions \\
                 <div>
                   <h4 className="font-semibold">问题：Claude Code 连接失败</h4>
                   <p className="text-muted-foreground">
-                    1. 检查环境变量是否正确设置（BASE_URL 包含 /v1）<br />
+                    1. 检查环境变量是否正确设置（BASE_URL <strong>不要</strong>加 /v1）<br />
                     2. 确认代理服务正在运行<br />
                     3. 测试网络连接：<code className="bg-muted px-1 py-0.5 rounded">curl {baseURL}/v1/models -H "Authorization: Bearer your_token"</code>
+                  </p>
+                </div>
+
+                <div>
+                  <h4 className="font-semibold">问题：404 /v1/v1/messages</h4>
+                  <p className="text-muted-foreground">
+                    这表示 URL 配置错误，BASE_URL 中多加了 /v1。<br />
+                    正确配置：<code className="bg-muted px-1 py-0.5 rounded">CLAUDE_API_BASE_URL="{baseURL}"</code><br />
+                    错误配置：<code className="bg-muted px-1 py-0.5 rounded line-through">CLAUDE_API_BASE_URL="{baseURL}/v1"</code>
                   </p>
                 </div>
               </div>

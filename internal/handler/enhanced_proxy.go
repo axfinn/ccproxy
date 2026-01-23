@@ -820,6 +820,520 @@ func (h *EnhancedProxyHandler) streamWebResponseEnhanced(c *gin.Context, resp *h
 	}
 }
 
+// Messages handles Anthropic native /v1/messages API with Web/API mode support
+func (h *EnhancedProxyHandler) Messages(c *gin.Context) {
+	log.Info().Msg("[Messages] Request received")
+
+	var req AnthropicRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		log.Error().Err(err).Msg("[Messages] Failed to parse request")
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	log.Debug().
+		Str("model", req.Model).
+		Int("max_tokens", req.MaxTokens).
+		Bool("stream", req.Stream).
+		Int("message_count", len(req.Messages)).
+		Msg("[Messages] Request parsed")
+
+	// Get user info from context
+	userID, _ := c.Get(middleware.ContextKeyTokenID)
+	userIDStr, _ := userID.(string)
+	log.Debug().Str("user_id", userIDStr).Msg("[Messages] User identified")
+
+	// Start metrics tracking
+	mode := h.determineMode(c)
+	log.Info().
+		Str("mode", mode).
+		Int("keypool_size", h.keyPool.Size()).
+		Msg("[Messages] Mode determined")
+
+	tracker := h.metrics.NewRequestTracker(mode, req.Model)
+	defer func() {
+		tracker.Finish(c.Writer.Status())
+	}()
+
+	// Rate limit check
+	if h.ratelimit != nil {
+		result, err := h.ratelimit.CheckAll(c.Request.Context(), userIDStr, "", c.ClientIP())
+		if err != nil || !result.Allowed {
+			log.Warn().Str("user_id", userIDStr).Msg("[Messages] Rate limit exceeded")
+			if h.metrics != nil {
+				h.metrics.RecordRateLimitHit("user")
+			}
+			c.JSON(http.StatusTooManyRequests, gin.H{
+				"error":    "rate limit exceeded",
+				"retry_at": result.RetryAt,
+			})
+			return
+		}
+	}
+
+	// Acquire user concurrency slot
+	if h.concurrency != nil {
+		result, err := h.concurrency.AcquireUserSlot(c.Request.Context(), userIDStr)
+		if err != nil {
+			log.Warn().Str("user_id", userIDStr).Err(err).Msg("[Messages] Concurrency limit exceeded")
+			c.JSON(http.StatusTooManyRequests, gin.H{"error": "too many concurrent requests"})
+			return
+		}
+		if result.WaitTime > 0 && h.metrics != nil {
+			h.metrics.RecordWait("user", result.WaitTime)
+		}
+		defer h.concurrency.ReleaseUserSlot(userIDStr)
+	}
+
+	// Try API mode first if keys available, otherwise use Web mode
+	if mode == "api" && h.keyPool.Size() > 0 {
+		log.Info().Msg("[Messages] Using API mode")
+		h.handleMessagesAPI(c, &req, userIDStr, tracker)
+	} else {
+		log.Info().Str("reason", fmt.Sprintf("mode=%s, keypool_size=%d", mode, h.keyPool.Size())).Msg("[Messages] Using Web mode")
+		h.handleMessagesWeb(c, &req, userIDStr, tracker)
+	}
+}
+
+func (h *EnhancedProxyHandler) handleMessagesAPI(c *gin.Context, req *AnthropicRequest, userID string, tracker *metrics.RequestTracker) {
+	log.Info().Msg("[Messages API] Getting API key from pool")
+	apiKey := h.keyPool.Get()
+	if apiKey == "" {
+		log.Warn().Msg("[Messages API] No API key available, falling back to Web mode")
+		// Fallback to Web mode
+		h.handleMessagesWeb(c, req, userID, tracker)
+		return
+	}
+	log.Debug().Str("key_prefix", apiKey[:20]+"...").Msg("[Messages API] Got API key")
+
+	payloadBytes, _ := json.Marshal(req)
+	targetURL := h.apiURL + "/v1/messages"
+	httpReq, err := http.NewRequestWithContext(c.Request.Context(), "POST", targetURL, bytes.NewReader(payloadBytes))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create request"})
+		return
+	}
+
+	httpReq.Header.Set("x-api-key", apiKey)
+	httpReq.Header.Set("anthropic-version", "2023-06-01")
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	// Copy anthropic-beta header if present
+	if beta := c.GetHeader("anthropic-beta"); beta != "" {
+		httpReq.Header.Set("anthropic-beta", beta)
+	}
+
+	var resp *http.Response
+	if h.pool != nil {
+		resp, err = h.pool.Do(httpReq, "api")
+	} else {
+		client := &http.Client{Timeout: 10 * time.Minute}
+		resp, err = client.Do(httpReq)
+	}
+
+	if err != nil {
+		h.keyPool.ReportError(apiKey)
+		log.Error().Err(err).Msg("failed to call Anthropic API")
+		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to connect to Anthropic API"})
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 200 && resp.StatusCode < 400 {
+		h.keyPool.ReportSuccess(apiKey)
+	} else if resp.StatusCode == 401 || resp.StatusCode == 403 {
+		h.keyPool.ReportError(apiKey)
+	}
+
+	// Copy response headers
+	for key, values := range resp.Header {
+		for _, value := range values {
+			c.Writer.Header().Add(key, value)
+		}
+	}
+
+	// Stream response directly (no conversion needed for Anthropic native format)
+	c.Status(resp.StatusCode)
+	io.Copy(c.Writer, resp.Body)
+}
+
+func (h *EnhancedProxyHandler) handleMessagesWeb(c *gin.Context, req *AnthropicRequest, userID string, tracker *metrics.RequestTracker) {
+	ctx := c.Request.Context()
+	log.Info().Msg("[Messages Web] Starting Web mode handler")
+
+	// Get available accounts
+	log.Debug().Msg("[Messages Web] Listing accounts from database")
+	accounts, err := h.store.ListAccounts()
+	if err != nil {
+		log.Error().Err(err).Msg("[Messages Web] Failed to list accounts")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list accounts"})
+		return
+	}
+	log.Info().Int("total_accounts", len(accounts)).Msg("[Messages Web] Retrieved accounts")
+
+	var accountIDs []string
+	for _, acc := range accounts {
+		log.Debug().
+			Str("id", acc.ID).
+			Str("name", acc.Name).
+			Bool("is_active", acc.IsActive).
+			Bool("is_expired", acc.IsExpired()).
+			Str("type", string(acc.Type)).
+			Msg("[Messages Web] Checking account")
+		if acc.IsActive && !acc.IsExpired() {
+			accountIDs = append(accountIDs, acc.ID)
+		}
+	}
+
+	log.Info().Int("available_accounts", len(accountIDs)).Strs("account_ids", accountIDs).Msg("[Messages Web] Available accounts")
+
+	if len(accountIDs) == 0 {
+		log.Error().Msg("[Messages Web] No active accounts available - returning 503")
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "no active accounts available"})
+		return
+	}
+
+	// Convert Anthropic request to OpenAI format for internal processing
+	openaiReq := h.convertAnthropicToOpenAI(req)
+
+	// Generate sticky session hash
+	stickyOpts := scheduler.StickyHashOptions{
+		UserID:       userID,
+		SystemPrompt: req.System,
+	}
+	for _, msg := range req.Messages {
+		if msg.Role == "user" && len(stickyOpts.Messages) == 0 {
+			stickyOpts.Messages = append(stickyOpts.Messages, msg.Content)
+		}
+	}
+	sessionHash := scheduler.GenerateStickyHash(stickyOpts)
+
+	// Select account with retry support
+	selectFn := func(ctx context.Context, excludeIDs []string) (string, error) {
+		if h.scheduler != nil {
+			result, err := h.scheduler.SelectAccountWithRetry(ctx, scheduler.SelectOptions{
+				AccountIDs:  accountIDs,
+				SessionHash: sessionHash,
+				UserID:      userID,
+			}, excludeIDs)
+			if err != nil {
+				return "", err
+			}
+			return result.AccountID, nil
+		}
+		// Fallback: return first available
+		for _, id := range accountIDs {
+			excluded := false
+			for _, ex := range excludeIDs {
+				if id == ex {
+					excluded = true
+					break
+				}
+			}
+			if !excluded {
+				return id, nil
+			}
+		}
+		return "", fmt.Errorf("no accounts available")
+	}
+
+	// Operation function
+	opFn := func(ctx context.Context, accountID string) (*http.Response, error) {
+		return h.executeWebRequest(ctx, accountID, openaiReq)
+	}
+
+	// Execute with retry
+	var result *retry.ExecuteResult
+	if h.retry != nil {
+		result, err = h.retry.Execute(ctx, selectFn, opFn)
+	} else {
+		// Simple execution without retry
+		accountID, err := selectFn(ctx, nil)
+		if err != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": err.Error()})
+			return
+		}
+		resp, err := opFn(ctx, accountID)
+		result = &retry.ExecuteResult{
+			Response:  resp,
+			AccountID: accountID,
+			Attempts:  1,
+		}
+		if err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+			return
+		}
+	}
+
+	if err != nil {
+		log.Error().Err(err).Int("attempts", result.Attempts).Int("switches", result.AccountSwitches).Msg("web request failed")
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+
+	if result.Response == nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "no response"})
+		return
+	}
+	defer result.Response.Body.Close()
+
+	// Update account last used
+	go h.store.UpdateAccountLastUsed(result.AccountID)
+
+	// Record metrics
+	if h.metrics != nil {
+		h.metrics.RecordAccountRequest(result.AccountID)
+	}
+
+	if result.Response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(result.Response.Body)
+		c.Data(result.Response.StatusCode, "application/json", body)
+		return
+	}
+
+	// Convert Web response to Anthropic format
+	if req.Stream {
+		h.streamWebResponseToAnthropic(c, result.Response, req.Model, tracker)
+	} else {
+		h.handleWebResponseToAnthropic(c, result.Response, req.Model)
+	}
+}
+
+// convertAnthropicToOpenAI converts Anthropic request to OpenAI format for Web mode
+func (h *EnhancedProxyHandler) convertAnthropicToOpenAI(req *AnthropicRequest) *OpenAIChatRequest {
+	openaiReq := &OpenAIChatRequest{
+		Model:       req.Model,
+		MaxTokens:   req.MaxTokens,
+		Temperature: req.Temperature,
+		TopP:        req.TopP,
+		Stream:      req.Stream,
+		Stop:        req.StopSequences,
+	}
+
+	// Add system message if present
+	if req.System != "" {
+		openaiReq.Messages = append(openaiReq.Messages, OpenAIMessage{
+			Role:    "system",
+			Content: req.System,
+		})
+	}
+
+	// Add messages
+	for _, msg := range req.Messages {
+		openaiReq.Messages = append(openaiReq.Messages, OpenAIMessage{
+			Role:    msg.Role,
+			Content: msg.Content,
+		})
+	}
+
+	return openaiReq
+}
+
+// handleWebResponseToAnthropic converts Web SSE response to Anthropic format
+func (h *EnhancedProxyHandler) handleWebResponseToAnthropic(c *gin.Context, resp *http.Response, model string) {
+	var content strings.Builder
+	scanner := bufio.NewScanner(resp.Body)
+	buf := make([]byte, 0, 64*1024)
+	scanner.Buffer(buf, 1024*1024)
+
+	stopReason := "end_turn"
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			continue
+		}
+
+		if strings.HasPrefix(line, "data: ") {
+			data := strings.TrimPrefix(line, "data: ")
+			if data == "[DONE]" {
+				break
+			}
+
+			var event map[string]interface{}
+			if err := json.Unmarshal([]byte(data), &event); err != nil {
+				continue
+			}
+
+			if completion, ok := event["completion"].(string); ok && completion != "" {
+				content.WriteString(completion)
+			}
+
+			if reason, ok := event["stop_reason"].(string); ok && reason != "" {
+				if reason == "max_tokens" {
+					stopReason = "max_tokens"
+				}
+			}
+		}
+	}
+
+	if content.Len() == 0 {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "no response content"})
+		return
+	}
+
+	// Build Anthropic response
+	anthropicResp := &AnthropicResponse{
+		ID:         "msg-" + uuid.New().String(),
+		Type:       "message",
+		Role:       "assistant",
+		Model:      model,
+		StopReason: stopReason,
+		Content: []AnthropicContent{
+			{
+				Type: "text",
+				Text: content.String(),
+			},
+		},
+		Usage: AnthropicUsage{
+			InputTokens:  0, // We don't have token counts from Web mode
+			OutputTokens: 0,
+		},
+	}
+
+	c.JSON(http.StatusOK, anthropicResp)
+}
+
+// streamWebResponseToAnthropic streams Web SSE response in Anthropic format
+func (h *EnhancedProxyHandler) streamWebResponseToAnthropic(c *gin.Context, resp *http.Response, model string, tracker *metrics.RequestTracker) {
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	c.Status(http.StatusOK)
+
+	scanner := bufio.NewScanner(resp.Body)
+	buf := make([]byte, 0, 64*1024)
+	scanner.Buffer(buf, 1024*1024)
+	responseID := "msg-" + uuid.New().String()
+	firstToken := true
+	sentMessageStart := false
+
+	defer func() {
+		// Send message_stop event
+		stopEvent := map[string]interface{}{
+			"type": "message_stop",
+		}
+		stopJSON, _ := json.Marshal(stopEvent)
+		fmt.Fprintf(c.Writer, "data: %s\n\n", stopJSON)
+		c.Writer.Flush()
+	}()
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			continue
+		}
+
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+
+		data := strings.TrimPrefix(line, "data: ")
+		if data == "[DONE]" {
+			break
+		}
+
+		var event map[string]interface{}
+		if err := json.Unmarshal([]byte(data), &event); err != nil {
+			continue
+		}
+
+		if completion, ok := event["completion"].(string); ok && completion != "" {
+			if firstToken {
+				tracker.RecordTTFT()
+				firstToken = false
+
+				// Send message_start event
+				startEvent := map[string]interface{}{
+					"type": "message_start",
+					"message": map[string]interface{}{
+						"id":    responseID,
+						"type":  "message",
+						"role":  "assistant",
+						"model": model,
+					},
+				}
+				startJSON, _ := json.Marshal(startEvent)
+				fmt.Fprintf(c.Writer, "data: %s\n\n", startJSON)
+				c.Writer.Flush()
+
+				// Send content_block_start event
+				blockStartEvent := map[string]interface{}{
+					"type":  "content_block_start",
+					"index": 0,
+					"content_block": map[string]interface{}{
+						"type": "text",
+						"text": "",
+					},
+				}
+				blockStartJSON, _ := json.Marshal(blockStartEvent)
+				fmt.Fprintf(c.Writer, "data: %s\n\n", blockStartJSON)
+				c.Writer.Flush()
+
+				sentMessageStart = true
+			}
+
+			// Send content_block_delta event
+			deltaEvent := map[string]interface{}{
+				"type":  "content_block_delta",
+				"index": 0,
+				"delta": map[string]interface{}{
+					"type": "text_delta",
+					"text": completion,
+				},
+			}
+			deltaJSON, _ := json.Marshal(deltaEvent)
+			fmt.Fprintf(c.Writer, "data: %s\n\n", deltaJSON)
+			c.Writer.Flush()
+		}
+
+		if stopReason, ok := event["stop_reason"].(string); ok && stopReason != "" {
+			if !sentMessageStart {
+				// Send minimal start events if we somehow got here without sending them
+				startEvent := map[string]interface{}{
+					"type": "message_start",
+					"message": map[string]interface{}{
+						"id":    responseID,
+						"type":  "message",
+						"role":  "assistant",
+						"model": model,
+					},
+				}
+				startJSON, _ := json.Marshal(startEvent)
+				fmt.Fprintf(c.Writer, "data: %s\n\n", startJSON)
+				c.Writer.Flush()
+			}
+
+			// Send content_block_stop event
+			blockStopEvent := map[string]interface{}{
+				"type":  "content_block_stop",
+				"index": 0,
+			}
+			blockStopJSON, _ := json.Marshal(blockStopEvent)
+			fmt.Fprintf(c.Writer, "data: %s\n\n", blockStopJSON)
+			c.Writer.Flush()
+
+			// Map stop reason
+			anthropicStopReason := "end_turn"
+			if stopReason == "max_tokens" {
+				anthropicStopReason = "max_tokens"
+			}
+
+			// Send message_delta event
+			deltaEvent := map[string]interface{}{
+				"type": "message_delta",
+				"delta": map[string]interface{}{
+					"stop_reason": anthropicStopReason,
+				},
+			}
+			deltaJSON, _ := json.Marshal(deltaEvent)
+			fmt.Fprintf(c.Writer, "data: %s\n\n", deltaJSON)
+			c.Writer.Flush()
+			break
+		}
+	}
+}
+
 // ListModels returns available models (OpenAI-compatible)
 func (h *EnhancedProxyHandler) ListModels(c *gin.Context) {
 	models := []map[string]interface{}{

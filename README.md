@@ -222,6 +222,21 @@ curl http://localhost:8080/v1/messages \
 
 ## Client Configuration
 
+### For Claude Code (CLI)
+
+```bash
+export ANTHROPIC_AUTH_TOKEN="your-jwt-token"
+export CLAUDE_API_BASE_URL="http://localhost:8080"
+```
+
+Or configure in `~/.claude/settings.json`:
+```json
+{
+  "apiBaseUrl": "http://localhost:8080",
+  "authToken": "your-jwt-token"
+}
+```
+
 ### For OpenAI-compatible clients
 
 ```bash
@@ -232,7 +247,7 @@ export OPENAI_API_KEY="your-jwt-token"
 ### For Anthropic SDK
 
 ```bash
-export ANTHROPIC_API_URL="http://localhost:8080"
+export ANTHROPIC_BASE_URL="http://localhost:8080"
 export ANTHROPIC_API_KEY="your-jwt-token"
 ```
 

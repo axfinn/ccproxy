@@ -2,38 +2,40 @@ package handler
 
 import (
 	"bufio"
-	"bytes"
 	"io"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/imroc/req/v3"
 	"github.com/rs/zerolog/log"
 
+	"ccproxy/internal/httpclient"
 	"ccproxy/internal/loadbalancer"
 )
 
 type APIProxyHandler struct {
-	keyPool    *loadbalancer.KeyPool
-	apiURL     string
-	httpClient *http.Client
+	keyPool   *loadbalancer.KeyPool
+	apiURL    string
+	reqClient *req.Client
 }
 
 func NewAPIProxyHandler(keyPool *loadbalancer.KeyPool, apiURL string) *APIProxyHandler {
 	return &APIProxyHandler{
-		keyPool: keyPool,
-		apiURL:  apiURL,
-		httpClient: &http.Client{
-			// 增加超时以支持慢模型（Opus）和大文档处理
-			Timeout: 10 * time.Minute,
-		},
+		keyPool:   keyPool,
+		apiURL:    apiURL,
+		reqClient: httpclient.GetClient(),
 	}
 }
 
 // Messages proxies the /v1/messages endpoint (Anthropic Messages API)
 func (h *APIProxyHandler) Messages(c *gin.Context) {
 	h.proxyRequest(c, "/v1/messages")
+}
+
+// CountTokens proxies the /v1/messages/count_tokens endpoint
+func (h *APIProxyHandler) CountTokens(c *gin.Context) {
+	h.proxyRequest(c, "/v1/messages/count_tokens")
 }
 
 // ProxyAny proxies any request to the Anthropic API
@@ -69,15 +71,12 @@ func (h *APIProxyHandler) proxyRequest(c *gin.Context, path string) {
 		return
 	}
 
-	// Create proxy request with context
-	req, err := http.NewRequestWithContext(c.Request.Context(), c.Request.Method, targetURL, bytes.NewReader(bodyBytes))
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create request"})
-		return
-	}
+	r := h.reqClient.R().
+		SetContext(c.Request.Context()).
+		SetBodyBytes(bodyBytes)
 
 	// Set authentication header
-	req.Header.Set("x-api-key", apiKey)
+	r.SetHeader("x-api-key", apiKey)
 
 	// Whitelist headers to forward (similar to sub2api)
 	allowedHeaders := map[string]bool{
@@ -99,27 +98,43 @@ func (h *APIProxyHandler) proxyRequest(c *gin.Context, path string) {
 		lowerKey := strings.ToLower(key)
 		if allowedHeaders[lowerKey] {
 			for _, value := range values {
-				req.Header.Add(key, value)
+				r.SetHeader(key, value)
 			}
 		}
 	}
 
-	// Ensure required headers are set
-	if req.Header.Get("Content-Type") == "" {
-		req.Header.Set("Content-Type", "application/json")
+	// Ensure required headers are set (use SetHeaderNonCanonical for case-sensitive headers)
+	if c.Request.Header.Get("Content-Type") == "" {
+		r.SetHeader("Content-Type", "application/json")
 	}
-	if req.Header.Get("anthropic-version") == "" {
-		req.Header.Set("anthropic-version", "2023-06-01")
+	if c.Request.Header.Get("anthropic-version") == "" {
+		r.SetHeader("anthropic-version", "2023-06-01")
 	}
-	if req.Header.Get("User-Agent") == "" {
-		req.Header.Set("User-Agent", "anthropic-sdk-go/0.1.0")
+	if c.Request.Header.Get("User-Agent") == "" {
+		r.SetHeader("User-Agent", "anthropic-sdk-go/0.1.0")
 	}
-	if req.Header.Get("Accept-Encoding") == "" {
-		req.Header.Set("Accept-Encoding", "gzip, deflate, br")
+	if c.Request.Header.Get("Accept-Encoding") == "" {
+		r.SetHeader("Accept-Encoding", "gzip, deflate, br")
 	}
 
-	// Execute request
-	resp, err := h.httpClient.Do(req)
+	// Enable streaming response
+	r.DisableAutoReadResponse()
+
+	// Execute request based on method
+	var resp *req.Response
+	switch c.Request.Method {
+	case "POST":
+		resp, err = r.Post(targetURL)
+	case "GET":
+		resp, err = r.Get(targetURL)
+	case "PUT":
+		resp, err = r.Put(targetURL)
+	case "DELETE":
+		resp, err = r.Delete(targetURL)
+	default:
+		resp, err = r.Send(c.Request.Method, targetURL)
+	}
+
 	if err != nil {
 		h.keyPool.ReportError(apiKey)
 		log.Error().Err(err).Str("url", targetURL).Msg("failed to proxy request")
@@ -143,7 +158,7 @@ func (h *APIProxyHandler) proxyRequest(c *gin.Context, path string) {
 	}
 
 	// Check if it's a streaming response
-	contentType := resp.Header.Get("Content-Type")
+	contentType := resp.GetHeader("Content-Type")
 	if strings.Contains(contentType, "text/event-stream") {
 		c.Header("Content-Type", "text/event-stream")
 		c.Header("Cache-Control", "no-cache")
