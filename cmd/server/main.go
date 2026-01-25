@@ -181,24 +181,54 @@ func main() {
 		log.Info().Dur("interval", cfg.Health.CheckInterval).Msg("initialized health monitor")
 	}
 
+	// Initialize request logger service
+	requestLoggerService := service.NewRequestLogger(db, 10000, 4)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := requestLoggerService.Start(ctx); err != nil {
+		log.Fatal().Err(err).Msg("failed to start request logger")
+	}
+	defer requestLoggerService.Stop()
+	log.Info().Msg("initialized request logger service")
+
+	// Initialize stats aggregator (runs daily at midnight)
+	statsAggregator := service.NewStatsAggregator(db, 24*time.Hour)
+	if err := statsAggregator.Start(ctx); err != nil {
+		log.Fatal().Err(err).Msg("failed to start stats aggregator")
+	}
+	defer statsAggregator.Stop()
+	log.Info().Msg("initialized stats aggregator")
+
+	// Initialize conversation compressor (compresses conversations older than 7 days)
+	conversationCompressor := service.NewConversationCompressor(db, 7*24*time.Hour, 24*time.Hour)
+	if err := conversationCompressor.Start(ctx); err != nil {
+		log.Fatal().Err(err).Msg("failed to start conversation compressor")
+	}
+	defer conversationCompressor.Stop()
+	log.Info().Msg("initialized conversation compressor")
+
 	// Initialize handlers
 	tokenHandler := handler.NewTokenHandler(jwtManager, db, cfg.JWT.DefaultExpiry)
 	sessionHandler := handler.NewSessionHandler(db)
 	accountHandler := handler.NewAccountHandler(db, oauthService)
+	requestLogsHandler := handler.NewRequestLogsHandler(db)
+	statsHandler := handler.NewStatsHandler(db)
+	conversationsHandler := handler.NewConversationsHandler(db)
 
 	// Use enhanced proxy handler
 	enhancedProxyHandler := handler.NewEnhancedProxyHandler(handler.EnhancedProxyConfig{
-		Store:       db,
-		KeyPool:     keyPool,
-		WebURL:      cfg.Claude.WebURL,
-		APIURL:      cfg.Claude.APIURL,
-		Pool:        httpPool,
-		Scheduler:   schedulerSvc,
-		Circuit:     circuitMgr,
-		Concurrency: concurrencyMgr,
-		RateLimit:   rateLimiter,
-		Retry:       retryExecutor,
-		Metrics:     metricsCollector,
+		Store:         db,
+		KeyPool:       keyPool,
+		WebURL:        cfg.Claude.WebURL,
+		APIURL:        cfg.Claude.APIURL,
+		Pool:          httpPool,
+		Scheduler:     schedulerSvc,
+		Circuit:       circuitMgr,
+		Concurrency:   concurrencyMgr,
+		RateLimit:     rateLimiter,
+		Retry:         retryExecutor,
+		Metrics:       metricsCollector,
+		RequestLogger: requestLoggerService,
 	})
 
 	// Keep legacy handlers for specific endpoints
@@ -238,6 +268,7 @@ func main() {
 		admin.POST("/token/generate", tokenHandler.Generate)
 		admin.GET("/token/list", tokenHandler.List)
 		admin.POST("/token/revoke", tokenHandler.Revoke)
+		admin.PUT("/token/:id/settings", tokenHandler.UpdateSettings)
 
 		// Account management (replaces session management)
 		admin.POST("/account/oauth", accountHandler.CreateOAuthAccount)
@@ -258,6 +289,29 @@ func main() {
 
 		// Key stats (API mode)
 		admin.GET("/keys/stats", apiProxyHandler.GetKeyStats)
+
+		// Request logs endpoints
+		admin.GET("/logs/requests", requestLogsHandler.ListRequestLogs)
+		admin.GET("/logs/requests/:id", requestLogsHandler.GetRequestLog)
+		admin.DELETE("/logs/requests/old", requestLogsHandler.DeleteOldRequestLogs)
+		admin.GET("/logs/requests/export", requestLogsHandler.ExportRequestLogs)
+
+		// Conversation endpoints
+		admin.GET("/conversations", conversationsHandler.ListConversations)
+		admin.GET("/conversations/:id", conversationsHandler.GetConversation)
+		admin.GET("/conversations/search", conversationsHandler.SearchConversations)
+		admin.DELETE("/conversations/:id", conversationsHandler.DeleteConversation)
+		admin.GET("/conversations/export", conversationsHandler.ExportConversations)
+
+		// Usage statistics endpoints
+		admin.GET("/stats/tokens/:id", statsHandler.GetTokenStats)
+		admin.GET("/stats/tokens/:id/trend", statsHandler.GetTokenTrend)
+		admin.GET("/stats/accounts/:id", statsHandler.GetAccountStats)
+		admin.GET("/stats/accounts/:id/trend", statsHandler.GetAccountTrend)
+		admin.GET("/stats/overview", statsHandler.GetOverview)
+		admin.GET("/stats/realtime", statsHandler.GetRealtimeStats)
+		admin.GET("/stats/top/tokens", statsHandler.GetTopTokens)
+		admin.GET("/stats/top/models", statsHandler.GetTopModels)
 
 		// Enhanced stats endpoints
 		admin.GET("/stats/pool", func(c *gin.Context) {
@@ -330,9 +384,6 @@ func main() {
 	}
 
 	// Start health monitor
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
 	if healthMonitor != nil {
 		if err := healthMonitor.Start(ctx); err != nil {
 			log.Error().Err(err).Msg("failed to start health monitor")

@@ -24,6 +24,7 @@ import (
 	"ccproxy/internal/ratelimit"
 	"ccproxy/internal/retry"
 	"ccproxy/internal/scheduler"
+	"ccproxy/internal/service"
 	"ccproxy/internal/store"
 )
 
@@ -35,44 +36,47 @@ type EnhancedProxyHandler struct {
 	apiURL  string
 
 	// New components
-	pool        pool.Pool
-	scheduler   scheduler.Scheduler
-	circuit     circuit.Manager
-	concurrency concurrency.Manager
-	ratelimit   ratelimit.MultiLimiter
-	retry       retry.Executor
-	metrics     *metrics.Metrics
+	pool          pool.Pool
+	scheduler     scheduler.Scheduler
+	circuit       circuit.Manager
+	concurrency   concurrency.Manager
+	ratelimit     ratelimit.MultiLimiter
+	retry         retry.Executor
+	metrics       *metrics.Metrics
+	requestLogger *service.RequestLogger
 }
 
 // EnhancedProxyConfig holds configuration for the enhanced proxy handler
 type EnhancedProxyConfig struct {
-	Store       *store.Store
-	KeyPool     *loadbalancer.KeyPool
-	WebURL      string
-	APIURL      string
-	Pool        pool.Pool
-	Scheduler   scheduler.Scheduler
-	Circuit     circuit.Manager
-	Concurrency concurrency.Manager
-	RateLimit   ratelimit.MultiLimiter
-	Retry       retry.Executor
-	Metrics     *metrics.Metrics
+	Store         *store.Store
+	KeyPool       *loadbalancer.KeyPool
+	WebURL        string
+	APIURL        string
+	Pool          pool.Pool
+	Scheduler     scheduler.Scheduler
+	Circuit       circuit.Manager
+	Concurrency   concurrency.Manager
+	RateLimit     ratelimit.MultiLimiter
+	Retry         retry.Executor
+	Metrics       *metrics.Metrics
+	RequestLogger *service.RequestLogger
 }
 
 // NewEnhancedProxyHandler creates a new enhanced proxy handler
 func NewEnhancedProxyHandler(cfg EnhancedProxyConfig) *EnhancedProxyHandler {
 	return &EnhancedProxyHandler{
-		store:       cfg.Store,
-		keyPool:     cfg.KeyPool,
-		webURL:      cfg.WebURL,
-		apiURL:      cfg.APIURL,
-		pool:        cfg.Pool,
-		scheduler:   cfg.Scheduler,
-		circuit:     cfg.Circuit,
-		concurrency: cfg.Concurrency,
-		ratelimit:   cfg.RateLimit,
-		retry:       cfg.Retry,
-		metrics:     cfg.Metrics,
+		store:         cfg.Store,
+		keyPool:       cfg.KeyPool,
+		webURL:        cfg.WebURL,
+		apiURL:        cfg.APIURL,
+		pool:          cfg.Pool,
+		scheduler:     cfg.Scheduler,
+		circuit:       cfg.Circuit,
+		concurrency:   cfg.Concurrency,
+		ratelimit:     cfg.RateLimit,
+		retry:         cfg.Retry,
+		metrics:       cfg.Metrics,
+		requestLogger: cfg.RequestLogger,
 	}
 }
 
@@ -101,6 +105,8 @@ func (h *EnhancedProxyHandler) ChatCompletions(c *gin.Context) {
 	// Get user info from context (token), fallback to metadata.user_id
 	userID, _ := c.Get(middleware.ContextKeyTokenID)
 	userIDStr, _ := userID.(string)
+	userName, _ := c.Get(middleware.ContextKeyUserName)
+	userNameStr, _ := userName.(string)
 	if userIDStr == "" {
 		if uid, ok := req.Metadata["user_id"].(string); ok && uid != "" {
 			userIDStr = uid
@@ -113,6 +119,27 @@ func (h *EnhancedProxyHandler) ChatCompletions(c *gin.Context) {
 	defer func() {
 		tracker.Finish(c.Writer.Status())
 	}()
+
+	// Create request log context
+	var enableConvLogging bool
+	if userIDStr != "" {
+		token, err := h.store.GetToken(userIDStr)
+		if err == nil && token != nil {
+			enableConvLogging = token.EnableConversationLogging
+		}
+	}
+
+	logCtx := createRequestLogContext(
+		userIDStr,
+		"", // accountID will be set later
+		userNameStr,
+		mode,
+		req.Model,
+		req.Stream,
+		enableConvLogging,
+		req.Messages,
+	)
+	c.Set("log_context", logCtx)
 
 	// Rate limit check
 	if h.ratelimit != nil {
@@ -335,8 +362,26 @@ func (h *EnhancedProxyHandler) handleWebModeEnhanced(c *gin.Context, req *OpenAI
 		h.metrics.RecordAccountRequest(result.AccountID)
 	}
 
+	// Update log context with account ID
+	if logCtxVal, exists := c.Get("log_context"); exists {
+		if logCtx, ok := logCtxVal.(*RequestLogContext); ok {
+			logCtx.AccountID = result.AccountID
+		}
+	}
+
 	if result.Response.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(result.Response.Body)
+
+		// Update log context with error
+		if logCtxVal, exists := c.Get("log_context"); exists {
+			if logCtx, ok := logCtxVal.(*RequestLogContext); ok {
+				logCtx.StatusCode = result.Response.StatusCode
+				logCtx.ResponseAt = time.Now()
+				logCtx.ErrorMessage = string(body)
+				go h.logRequest(logCtx)
+			}
+		}
+
 		c.Data(result.Response.StatusCode, "application/json", body)
 		return
 	}
@@ -545,16 +590,60 @@ func (h *EnhancedProxyHandler) setWebHeaders(req *http.Request, account *store.A
 }
 
 func (h *EnhancedProxyHandler) handleAPIResponseEnhanced(c *gin.Context, resp *http.Response, model string) {
+	// Get log context
+	logCtxVal, _ := c.Get("log_context")
+	logCtx, _ := logCtxVal.(*RequestLogContext)
+
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
+
+		// Update log context with error
+		if logCtx != nil {
+			logCtx.StatusCode = resp.StatusCode
+			logCtx.ResponseAt = time.Now()
+			logCtx.ErrorMessage = string(body)
+			go h.logRequest(logCtx)
+		}
+
 		c.Data(resp.StatusCode, "application/json", body)
 		return
 	}
 
 	var anthropicResp AnthropicResponse
 	if err := json.NewDecoder(resp.Body).Decode(&anthropicResp); err != nil {
+		// Update log context with error
+		if logCtx != nil {
+			logCtx.StatusCode = http.StatusInternalServerError
+			logCtx.ResponseAt = time.Now()
+			logCtx.ErrorMessage = err.Error()
+			go h.logRequest(logCtx)
+		}
+
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to parse response"})
 		return
+	}
+
+	// Update log context with success
+	if logCtx != nil {
+		logCtx.StatusCode = http.StatusOK
+		logCtx.ResponseAt = time.Now()
+		logCtx.PromptTokens = anthropicResp.Usage.InputTokens
+		logCtx.CompletionTokens = anthropicResp.Usage.OutputTokens
+		logCtx.TotalTokens = anthropicResp.Usage.InputTokens + anthropicResp.Usage.OutputTokens
+
+		// Extract completion text
+		for _, content := range anthropicResp.Content {
+			if content.Type == "text" {
+				logCtx.Completion += content.Text
+			}
+		}
+
+		// Set conversation ID if present
+		if anthropicResp.ID != "" {
+			logCtx.ConversationID = anthropicResp.ID
+		}
+
+		go h.logRequest(logCtx)
 	}
 
 	openaiResp := h.convertToOpenAI(&anthropicResp, model)
@@ -598,8 +687,21 @@ func (h *EnhancedProxyHandler) convertToOpenAI(resp *AnthropicResponse, model st
 }
 
 func (h *EnhancedProxyHandler) streamAPIResponseEnhanced(c *gin.Context, resp *http.Response, model string, tracker *metrics.RequestTracker) {
+	// Get log context
+	logCtxVal, _ := c.Get("log_context")
+	logCtx, _ := logCtxVal.(*RequestLogContext)
+
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
+
+		// Update log context with error
+		if logCtx != nil {
+			logCtx.StatusCode = resp.StatusCode
+			logCtx.ResponseAt = time.Now()
+			logCtx.ErrorMessage = string(body)
+			go h.logRequest(logCtx)
+		}
+
 		c.Data(resp.StatusCode, "application/json", body)
 		return
 	}
@@ -615,6 +717,8 @@ func (h *EnhancedProxyHandler) streamAPIResponseEnhanced(c *gin.Context, resp *h
 
 	responseID := "chatcmpl-" + uuid.New().String()[:8]
 	firstToken := true
+	var completion strings.Builder
+	var inputTokens, outputTokens int
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -641,6 +745,7 @@ func (h *EnhancedProxyHandler) streamAPIResponseEnhanced(c *gin.Context, resp *h
 					tracker.RecordTTFT()
 					firstToken = false
 				}
+				completion.WriteString(event.Delta.Text)
 				chunk := OpenAIChatResponse{
 					ID:      responseID,
 					Object:  "chat.completion.chunk",
@@ -660,7 +765,17 @@ func (h *EnhancedProxyHandler) streamAPIResponseEnhanced(c *gin.Context, resp *h
 				fmt.Fprintf(c.Writer, "data: %s\n\n", chunkJSON)
 				c.Writer.Flush()
 			}
+		case "message_start":
+			// Extract message ID for conversation ID
+			if logCtx != nil && event.Message != nil && event.Message.ID != "" {
+				logCtx.ConversationID = event.Message.ID
+			}
 		case "message_delta":
+			// Extract usage information
+			if event.Usage != nil {
+				inputTokens = event.Usage.InputTokens
+				outputTokens = event.Usage.OutputTokens
+			}
 			if event.Delta != nil && event.Delta.StopReason != "" {
 				finishReason := "stop"
 				if event.Delta.StopReason == "max_tokens" {
@@ -688,9 +803,24 @@ func (h *EnhancedProxyHandler) streamAPIResponseEnhanced(c *gin.Context, resp *h
 			c.Writer.Flush()
 		}
 	}
+
+	// Update log context after stream finishes
+	if logCtx != nil {
+		logCtx.StatusCode = http.StatusOK
+		logCtx.ResponseAt = time.Now()
+		logCtx.Completion = completion.String()
+		logCtx.PromptTokens = inputTokens
+		logCtx.CompletionTokens = outputTokens
+		logCtx.TotalTokens = inputTokens + outputTokens
+		go h.logRequest(logCtx)
+	}
 }
 
 func (h *EnhancedProxyHandler) handleWebResponseEnhanced(c *gin.Context, resp *http.Response, model string) {
+	// Get log context
+	logCtxVal, _ := c.Get("log_context")
+	logCtx, _ := logCtxVal.(*RequestLogContext)
+
 	var content strings.Builder
 	scanner := bufio.NewScanner(resp.Body)
 	buf := make([]byte, 0, 64*1024)
@@ -729,8 +859,25 @@ func (h *EnhancedProxyHandler) handleWebResponseEnhanced(c *gin.Context, resp *h
 	}
 
 	if content.Len() == 0 {
+		// Update log context with error
+		if logCtx != nil {
+			logCtx.StatusCode = http.StatusInternalServerError
+			logCtx.ResponseAt = time.Now()
+			logCtx.ErrorMessage = "no response content"
+			go h.logRequest(logCtx)
+		}
+
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "no response content"})
 		return
+	}
+
+	// Update log context with success
+	if logCtx != nil {
+		logCtx.StatusCode = http.StatusOK
+		logCtx.ResponseAt = time.Now()
+		logCtx.Completion = content.String()
+		// Note: Web mode may not provide token counts, they'll remain 0
+		go h.logRequest(logCtx)
 	}
 
 	openaiResp := &OpenAIChatResponse{
@@ -754,6 +901,10 @@ func (h *EnhancedProxyHandler) handleWebResponseEnhanced(c *gin.Context, resp *h
 }
 
 func (h *EnhancedProxyHandler) streamWebResponseEnhanced(c *gin.Context, resp *http.Response, model string, tracker *metrics.RequestTracker) {
+	// Get log context
+	logCtxVal, _ := c.Get("log_context")
+	logCtx, _ := logCtxVal.(*RequestLogContext)
+
 	c.Header("Content-Type", "text/event-stream")
 	c.Header("Cache-Control", "no-cache")
 	c.Header("Connection", "keep-alive")
@@ -764,10 +915,20 @@ func (h *EnhancedProxyHandler) streamWebResponseEnhanced(c *gin.Context, resp *h
 	scanner.Buffer(buf, 1024*1024)
 	responseID := "chatcmpl-" + uuid.New().String()[:8]
 	firstToken := true
+	var completion strings.Builder
 
 	defer func() {
 		fmt.Fprintf(c.Writer, "data: [DONE]\n\n")
 		c.Writer.Flush()
+
+		// Update log context after stream finishes
+		if logCtx != nil {
+			logCtx.StatusCode = http.StatusOK
+			logCtx.ResponseAt = time.Now()
+			logCtx.Completion = completion.String()
+			// Note: Web mode may not provide token counts, they'll remain 0
+			go h.logRequest(logCtx)
+		}
 	}()
 
 	for scanner.Scan() {
@@ -790,11 +951,12 @@ func (h *EnhancedProxyHandler) streamWebResponseEnhanced(c *gin.Context, resp *h
 			continue
 		}
 
-		if completion, ok := event["completion"].(string); ok && completion != "" {
+		if completionText, ok := event["completion"].(string); ok && completionText != "" {
 			if firstToken {
 				tracker.RecordTTFT()
 				firstToken = false
 			}
+			completion.WriteString(completionText)
 			chunk := OpenAIChatResponse{
 				ID:      responseID,
 				Object:  "chat.completion.chunk",
@@ -804,7 +966,7 @@ func (h *EnhancedProxyHandler) streamWebResponseEnhanced(c *gin.Context, resp *h
 					{
 						Index: 0,
 						Delta: &OpenAIMessage{
-							Content: completion,
+							Content: completionText,
 						},
 						FinishReason: nil,
 					},

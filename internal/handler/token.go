@@ -101,14 +101,17 @@ type TokenListResponse struct {
 }
 
 type TokenInfo struct {
-	ID         string     `json:"id"`
-	Name       string     `json:"name"`
-	Mode       string     `json:"mode"`
-	CreatedAt  time.Time  `json:"created_at"`
-	ExpiresAt  time.Time  `json:"expires_at"`
-	RevokedAt  *time.Time `json:"revoked_at,omitempty"`
-	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
-	IsValid    bool       `json:"is_valid"`
+	ID                        string     `json:"id"`
+	Name                      string     `json:"name"`
+	Mode                      string     `json:"mode"`
+	CreatedAt                 time.Time  `json:"created_at"`
+	ExpiresAt                 time.Time  `json:"expires_at"`
+	RevokedAt                 *time.Time `json:"revoked_at,omitempty"`
+	LastUsedAt                *time.Time `json:"last_used_at,omitempty"`
+	IsValid                   bool       `json:"is_valid"`
+	EnableConversationLogging bool       `json:"enable_conversation_logging"`
+	TotalRequests             int        `json:"total_requests"`
+	TotalTokensUsed           int        `json:"total_tokens_used"`
 }
 
 func (h *TokenHandler) List(c *gin.Context) {
@@ -123,14 +126,17 @@ func (h *TokenHandler) List(c *gin.Context) {
 	for i, t := range tokens {
 		isValid := t.RevokedAt == nil && t.ExpiresAt.After(now)
 		response[i] = &TokenInfo{
-			ID:         t.ID,
-			Name:       t.UserName,
-			Mode:       t.Mode,
-			CreatedAt:  t.CreatedAt,
-			ExpiresAt:  t.ExpiresAt,
-			RevokedAt:  t.RevokedAt,
-			LastUsedAt: t.LastUsedAt,
-			IsValid:    isValid,
+			ID:                        t.ID,
+			Name:                      t.UserName,
+			Mode:                      t.Mode,
+			CreatedAt:                 t.CreatedAt,
+			ExpiresAt:                 t.ExpiresAt,
+			RevokedAt:                 t.RevokedAt,
+			LastUsedAt:                t.LastUsedAt,
+			IsValid:                   isValid,
+			EnableConversationLogging: t.EnableConversationLogging,
+			TotalRequests:             t.TotalRequests,
+			TotalTokensUsed:           t.TotalTokensUsed,
 		}
 	}
 
@@ -159,14 +165,17 @@ func (h *TokenHandler) Info(c *gin.Context) {
 	isValid := token.RevokedAt == nil && token.ExpiresAt.After(now)
 
 	c.JSON(http.StatusOK, TokenInfo{
-		ID:         token.ID,
-		Name:       token.UserName,
-		Mode:       token.Mode,
-		CreatedAt:  token.CreatedAt,
-		ExpiresAt:  token.ExpiresAt,
-		RevokedAt:  token.RevokedAt,
-		LastUsedAt: token.LastUsedAt,
-		IsValid:    isValid,
+		ID:                        token.ID,
+		Name:                      token.UserName,
+		Mode:                      token.Mode,
+		CreatedAt:                 token.CreatedAt,
+		ExpiresAt:                 token.ExpiresAt,
+		RevokedAt:                 token.RevokedAt,
+		LastUsedAt:                token.LastUsedAt,
+		IsValid:                   isValid,
+		EnableConversationLogging: token.EnableConversationLogging,
+		TotalRequests:             token.TotalRequests,
+		TotalTokensUsed:           token.TotalTokensUsed,
 	})
 }
 
@@ -187,4 +196,32 @@ func (h *TokenHandler) Revoke(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "token revoked successfully"})
+}
+
+type UpdateTokenSettingsRequest struct {
+	EnableConversationLogging *bool `json:"enable_conversation_logging"`
+}
+
+func (h *TokenHandler) UpdateSettings(c *gin.Context) {
+	id := c.Param("id")
+	if id == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "id is required"})
+		return
+	}
+
+	var req UpdateTokenSettingsRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Update conversation logging setting
+	if req.EnableConversationLogging != nil {
+		if err := h.store.UpdateTokenSettings(id, *req.EnableConversationLogging); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update token settings"})
+			return
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "token settings updated successfully"})
 }

@@ -12,13 +12,16 @@ type Store struct {
 }
 
 type Token struct {
-	ID         string     `json:"id"`
-	UserName   string     `json:"user_name"`
-	Mode       string     `json:"mode"` // "web", "api", or "both"
-	CreatedAt  time.Time  `json:"created_at"`
-	ExpiresAt  time.Time  `json:"expires_at"`
-	RevokedAt  *time.Time `json:"revoked_at,omitempty"`
-	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
+	ID                         string     `json:"id"`
+	UserName                   string     `json:"user_name"`
+	Mode                       string     `json:"mode"` // "web", "api", or "both"
+	CreatedAt                  time.Time  `json:"created_at"`
+	ExpiresAt                  time.Time  `json:"expires_at"`
+	RevokedAt                  *time.Time `json:"revoked_at,omitempty"`
+	LastUsedAt                 *time.Time `json:"last_used_at,omitempty"`
+	EnableConversationLogging  bool       `json:"enable_conversation_logging"`
+	TotalRequests              int        `json:"total_requests"`
+	TotalTokensUsed            int        `json:"total_tokens_used"`
 }
 
 type Session struct {
@@ -33,7 +36,8 @@ type Session struct {
 }
 
 func New(dbPath string) (*Store, error) {
-	db, err := sql.Open("sqlite3", dbPath)
+	// Enable WAL mode and optimizations for better performance
+	db, err := sql.Open("sqlite3", dbPath+"?_journal_mode=WAL&_synchronous=NORMAL&_cache_size=-64000")
 	if err != nil {
 		return nil, err
 	}
@@ -96,6 +100,73 @@ func (s *Store) migrate() error {
 		`CREATE INDEX IF NOT EXISTS idx_accounts_type ON accounts(type)`,
 		`CREATE INDEX IF NOT EXISTS idx_accounts_health ON accounts(health_status)`,
 		`CREATE INDEX IF NOT EXISTS idx_accounts_priority ON accounts(priority)`,
+
+		// Request logs table for detailed logging
+		`CREATE TABLE IF NOT EXISTS request_logs (
+			id TEXT PRIMARY KEY,
+			token_id TEXT NOT NULL,
+			account_id TEXT,
+			user_name TEXT,
+			mode TEXT NOT NULL,
+			model TEXT NOT NULL,
+			stream BOOLEAN NOT NULL,
+			request_at DATETIME NOT NULL,
+			response_at DATETIME,
+			duration_ms INTEGER,
+			ttft_ms INTEGER,
+			prompt_tokens INTEGER DEFAULT 0,
+			completion_tokens INTEGER DEFAULT 0,
+			total_tokens INTEGER DEFAULT 0,
+			status_code INTEGER NOT NULL,
+			success BOOLEAN NOT NULL,
+			error_message TEXT,
+			conversation_id TEXT,
+			FOREIGN KEY (token_id) REFERENCES tokens(id) ON DELETE CASCADE,
+			FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE SET NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_request_logs_token_id ON request_logs(token_id, request_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_request_logs_account_id ON request_logs(account_id, request_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_request_logs_request_at ON request_logs(request_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_request_logs_status ON request_logs(success, status_code)`,
+
+		// Conversation contents table for dialogue recording
+		`CREATE TABLE IF NOT EXISTS conversation_contents (
+			id TEXT PRIMARY KEY,
+			request_log_id TEXT NOT NULL,
+			token_id TEXT NOT NULL,
+			system_prompt TEXT,
+			messages_json TEXT NOT NULL,
+			prompt TEXT NOT NULL,
+			completion TEXT NOT NULL,
+			created_at DATETIME NOT NULL,
+			is_compressed BOOLEAN DEFAULT 0,
+			FOREIGN KEY (request_log_id) REFERENCES request_logs(id) ON DELETE CASCADE,
+			FOREIGN KEY (token_id) REFERENCES tokens(id) ON DELETE CASCADE
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_conversation_token_id ON conversation_contents(token_id, created_at DESC)`,
+
+		// Usage stats daily aggregation table
+		`CREATE TABLE IF NOT EXISTS usage_stats_daily (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			stat_date DATE NOT NULL,
+			token_id TEXT,
+			account_id TEXT,
+			mode TEXT,
+			model TEXT,
+			request_count INTEGER DEFAULT 0,
+			success_count INTEGER DEFAULT 0,
+			error_count INTEGER DEFAULT 0,
+			total_prompt_tokens INTEGER DEFAULT 0,
+			total_completion_tokens INTEGER DEFAULT 0,
+			total_tokens INTEGER DEFAULT 0,
+			avg_duration_ms INTEGER DEFAULT 0,
+			avg_ttft_ms INTEGER DEFAULT 0,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(stat_date, token_id, account_id, mode, model)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_usage_stats_date ON usage_stats_daily(stat_date DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_usage_stats_token ON usage_stats_daily(token_id, stat_date DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_usage_stats_account ON usage_stats_daily(account_id, stat_date DESC)`,
 	}
 
 	for _, query := range queries {
@@ -104,11 +175,36 @@ func (s *Store) migrate() error {
 		}
 	}
 
+	// Add new columns to tokens table (ignore errors if columns already exist)
+	_ = s.addColumnIfNotExists("tokens", "enable_conversation_logging", "BOOLEAN DEFAULT 0")
+	_ = s.addColumnIfNotExists("tokens", "total_requests", "INTEGER DEFAULT 0")
+	_ = s.addColumnIfNotExists("tokens", "total_tokens_used", "INTEGER DEFAULT 0")
+
+	// Create FTS5 virtual table for conversation search
+	_, _ = s.db.Exec(`CREATE VIRTUAL TABLE IF NOT EXISTS conversation_search USING fts5(
+		id UNINDEXED,
+		prompt,
+		completion,
+		content='conversation_contents',
+		content_rowid='rowid'
+	)`)
+
 	// Migrate data from sessions table to accounts table if sessions exist
 	if err := s.migrateSessionsToAccounts(); err != nil {
 		return err
 	}
 
+	return nil
+}
+
+// addColumnIfNotExists adds a column to a table if it doesn't exist
+func (s *Store) addColumnIfNotExists(table, column, definition string) error {
+	query := `ALTER TABLE ` + table + ` ADD COLUMN ` + column + ` ` + definition
+	_, err := s.db.Exec(query)
+	// Ignore "duplicate column name" error
+	if err != nil && err.Error() != "duplicate column name: "+column {
+		return err
+	}
 	return nil
 }
 
@@ -177,11 +273,17 @@ func (s *Store) CreateToken(token *Token) error {
 }
 
 func (s *Store) GetToken(id string) (*Token, error) {
-	query := `SELECT id, user_name, mode, created_at, expires_at, revoked_at, last_used_at FROM tokens WHERE id = ?`
+	query := `SELECT id, user_name, mode, created_at, expires_at, revoked_at, last_used_at,
+		COALESCE(enable_conversation_logging, 0),
+		COALESCE(total_requests, 0),
+		COALESCE(total_tokens_used, 0)
+		FROM tokens WHERE id = ?`
 	row := s.db.QueryRow(query, id)
 
 	var token Token
-	err := row.Scan(&token.ID, &token.UserName, &token.Mode, &token.CreatedAt, &token.ExpiresAt, &token.RevokedAt, &token.LastUsedAt)
+	err := row.Scan(&token.ID, &token.UserName, &token.Mode, &token.CreatedAt, &token.ExpiresAt,
+		&token.RevokedAt, &token.LastUsedAt, &token.EnableConversationLogging,
+		&token.TotalRequests, &token.TotalTokensUsed)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
@@ -193,13 +295,18 @@ func (s *Store) GetToken(id string) (*Token, error) {
 }
 
 func (s *Store) ValidateToken(id string) (*Token, error) {
-	query := `SELECT id, user_name, mode, created_at, expires_at, revoked_at, last_used_at
+	query := `SELECT id, user_name, mode, created_at, expires_at, revoked_at, last_used_at,
+		COALESCE(enable_conversation_logging, 0),
+		COALESCE(total_requests, 0),
+		COALESCE(total_tokens_used, 0)
 		FROM tokens
 		WHERE id = ? AND revoked_at IS NULL AND expires_at > datetime('now')`
 	row := s.db.QueryRow(query, id)
 
 	var token Token
-	err := row.Scan(&token.ID, &token.UserName, &token.Mode, &token.CreatedAt, &token.ExpiresAt, &token.RevokedAt, &token.LastUsedAt)
+	err := row.Scan(&token.ID, &token.UserName, &token.Mode, &token.CreatedAt, &token.ExpiresAt,
+		&token.RevokedAt, &token.LastUsedAt, &token.EnableConversationLogging,
+		&token.TotalRequests, &token.TotalTokensUsed)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
@@ -223,7 +330,11 @@ func (s *Store) RevokeToken(id string) error {
 }
 
 func (s *Store) ListTokens() ([]*Token, error) {
-	query := `SELECT id, user_name, mode, created_at, expires_at, revoked_at, last_used_at FROM tokens ORDER BY created_at DESC`
+	query := `SELECT id, user_name, mode, created_at, expires_at, revoked_at, last_used_at,
+		COALESCE(enable_conversation_logging, 0),
+		COALESCE(total_requests, 0),
+		COALESCE(total_tokens_used, 0)
+		FROM tokens ORDER BY created_at DESC`
 	rows, err := s.db.Query(query)
 	if err != nil {
 		return nil, err
@@ -233,7 +344,9 @@ func (s *Store) ListTokens() ([]*Token, error) {
 	var tokens []*Token
 	for rows.Next() {
 		var token Token
-		if err := rows.Scan(&token.ID, &token.UserName, &token.Mode, &token.CreatedAt, &token.ExpiresAt, &token.RevokedAt, &token.LastUsedAt); err != nil {
+		if err := rows.Scan(&token.ID, &token.UserName, &token.Mode, &token.CreatedAt,
+			&token.ExpiresAt, &token.RevokedAt, &token.LastUsedAt,
+			&token.EnableConversationLogging, &token.TotalRequests, &token.TotalTokensUsed); err != nil {
 			return nil, err
 		}
 		tokens = append(tokens, &token)
@@ -249,6 +362,22 @@ func (s *Store) CleanupExpiredTokens() (int64, error) {
 		return 0, err
 	}
 	return result.RowsAffected()
+}
+
+func (s *Store) UpdateTokenSettings(id string, enableConvLogging bool) error {
+	query := `UPDATE tokens SET enable_conversation_logging = ? WHERE id = ?`
+	_, err := s.db.Exec(query, enableConvLogging)
+	return err
+}
+
+func (s *Store) IncrementTokenUsage(id string, tokensUsed int) error {
+	query := `UPDATE tokens SET
+		total_requests = total_requests + 1,
+		total_tokens_used = total_tokens_used + ?,
+		last_used_at = datetime('now')
+		WHERE id = ?`
+	_, err := s.db.Exec(query, tokensUsed, id)
+	return err
 }
 
 // Session operations
@@ -335,4 +464,8 @@ func (s *Store) DeleteSession(id string) error {
 
 func (s *Store) Close() error {
 	return s.db.Close()
+}
+
+func (s *Store) GetDB() *sql.DB {
+	return s.db
 }
