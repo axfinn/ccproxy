@@ -9,6 +9,9 @@ import { Accounts } from '@/pages/Accounts';
 import { Sessions } from '@/pages/Sessions';
 import { ApiKeys } from '@/pages/ApiKeys';
 import { Docs } from '@/pages/Docs';
+import { UsageStats } from '@/pages/UsageStats';
+import { Conversations } from '@/pages/Conversations';
+import { RequestLogs } from '@/pages/RequestLogs';
 import { TooltipProvider } from '@/components/ui/tooltip';
 
 const queryClient = new QueryClient({
@@ -54,6 +57,9 @@ function AppRoutes() {
         <Route path="accounts" element={<Accounts />} />
         <Route path="sessions" element={<Sessions />} />
         <Route path="api-keys" element={<ApiKeys />} />
+        <Route path="usage-stats" element={<UsageStats />} />
+        <Route path="conversations" element={<Conversations />} />
+        <Route path="request-logs" element={<RequestLogs />} />
         <Route path="docs" element={<Docs />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />

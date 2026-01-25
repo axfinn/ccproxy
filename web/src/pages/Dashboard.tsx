@@ -1,9 +1,11 @@
+import { Link } from 'react-router-dom';
 import { useTokens } from '@/hooks/useTokens';
 import { useSessions } from '@/hooks/useSessions';
 import { useApiKeys } from '@/hooks/useApiKeys';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { Key, Globe, Server, Activity } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { Key, Globe, Server, Activity, BarChart3, MessageSquare, FileText, ArrowRight } from 'lucide-react';
 
 export function Dashboard() {
   const { data: tokenData, isLoading: tokensLoading } = useTokens();
@@ -99,6 +101,80 @@ export function Dashboard() {
           </CardContent>
         </Card>
       </div>
+
+      {/* Quick Access to New Features */}
+      <Card>
+        <CardHeader>
+          <CardTitle>统计和日志</CardTitle>
+          <CardDescription>查看系统使用情况和详细日志</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="grid gap-4 md:grid-cols-3">
+            <Link to="/usage-stats" className="block">
+              <Card className="cursor-pointer hover:bg-muted/50 transition-colors">
+                <CardContent className="pt-6">
+                  <div className="flex items-start gap-4">
+                    <div className="p-2 bg-primary/10 rounded-lg">
+                      <BarChart3 className="h-6 w-6 text-primary" />
+                    </div>
+                    <div className="flex-1">
+                      <h3 className="font-semibold mb-1">用量统计</h3>
+                      <p className="text-xs text-muted-foreground mb-2">
+                        Token 使用量、请求数、成功率等统计数据
+                      </p>
+                      <Button variant="ghost" size="sm" className="p-0 h-auto">
+                        查看详情 <ArrowRight className="ml-1 h-3 w-3" />
+                      </Button>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            </Link>
+
+            <Link to="/conversations" className="block">
+              <Card className="cursor-pointer hover:bg-muted/50 transition-colors">
+                <CardContent className="pt-6">
+                  <div className="flex items-start gap-4">
+                    <div className="p-2 bg-primary/10 rounded-lg">
+                      <MessageSquare className="h-6 w-6 text-primary" />
+                    </div>
+                    <div className="flex-1">
+                      <h3 className="font-semibold mb-1">对话记录</h3>
+                      <p className="text-xs text-muted-foreground mb-2">
+                        查看和搜索用户对话内容，支持导出
+                      </p>
+                      <Button variant="ghost" size="sm" className="p-0 h-auto">
+                        查看详情 <ArrowRight className="ml-1 h-3 w-3" />
+                      </Button>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            </Link>
+
+            <Link to="/request-logs" className="block">
+              <Card className="cursor-pointer hover:bg-muted/50 transition-colors">
+                <CardContent className="pt-6">
+                  <div className="flex items-start gap-4">
+                    <div className="p-2 bg-primary/10 rounded-lg">
+                      <FileText className="h-6 w-6 text-primary" />
+                    </div>
+                    <div className="flex-1">
+                      <h3 className="font-semibold mb-1">请求日志</h3>
+                      <p className="text-xs text-muted-foreground mb-2">
+                        详细的 API 请求日志，包含 Token 使用和性能数据
+                      </p>
+                      <Button variant="ghost" size="sm" className="p-0 h-auto">
+                        查看详情 <ArrowRight className="ml-1 h-3 w-3" />
+                      </Button>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            </Link>
+          </div>
+        </CardContent>
+      </Card>
 
       <div className="grid gap-4 md:grid-cols-2">
         <Card>

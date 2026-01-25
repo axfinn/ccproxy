@@ -246,7 +246,7 @@ func (h *StatsHandler) GetTopTokens(c *gin.Context) {
 		SuccessRate   float64 `json:"success_rate"`
 	}
 
-	var topTokens []TopToken
+	topTokens := make([]TopToken, 0)
 	for rows.Next() {
 		var t TopToken
 		if err := rows.Scan(&t.TokenID, &t.TotalRequests, &t.TotalTokens, &t.SuccessCount, &t.ErrorCount); err != nil {
@@ -300,7 +300,7 @@ func (h *StatsHandler) GetTopModels(c *gin.Context) {
 		SuccessRate   float64 `json:"success_rate"`
 	}
 
-	var modelStats []ModelStats
+	modelStats := make([]ModelStats, 0)
 	for rows.Next() {
 		var m ModelStats
 		if err := rows.Scan(&m.Model, &m.TotalRequests, &m.TotalTokens, &m.SuccessCount); err != nil {

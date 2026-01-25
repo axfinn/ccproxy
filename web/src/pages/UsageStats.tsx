@@ -181,7 +181,7 @@ export function UsageStats() {
           <CardContent>
             {tokensLoading ? (
               <div className="text-center py-8 text-muted-foreground">加载中...</div>
-            ) : topTokens && topTokens.tokens.length > 0 ? (
+            ) : topTokens && topTokens.tokens && topTokens.tokens.length > 0 ? (
               <Table>
                 <TableHeader>
                   <TableRow>
@@ -221,7 +221,7 @@ export function UsageStats() {
           <CardContent>
             {modelsLoading ? (
               <div className="text-center py-8 text-muted-foreground">加载中...</div>
-            ) : topModels && topModels.models.length > 0 ? (
+            ) : topModels && topModels.models && topModels.models.length > 0 ? (
               <Table>
                 <TableHeader>
                   <TableRow>

@@ -5,11 +5,10 @@ import { apiClient } from '@/api/client';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
-import { Download, Search, AlertCircle, CheckCircle2, XCircle, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Download, AlertCircle, CheckCircle2, XCircle, ChevronLeft, ChevronRight } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import type { RequestLog } from '@/api/types';
 
@@ -22,7 +21,7 @@ export function RequestLogs() {
   const [exporting, setExporting] = useState(false);
 
   const { data: tokensData } = useTokens();
-  const { data, loading, error, refetch } = useRequestLogs({
+  const { data, loading, error } = useRequestLogs({
     token_id: tokenFilter || undefined,
     mode: modeFilter || undefined,
     success: successFilter,
@@ -119,12 +118,12 @@ export function RequestLogs() {
           <div className="grid gap-4 md:grid-cols-4">
             <div>
               <label className="text-sm font-medium mb-2 block">Token</label>
-              <Select value={tokenFilter} onValueChange={setTokenFilter}>
+              <Select value={tokenFilter || 'all'} onValueChange={(v) => setTokenFilter(v === 'all' ? '' : v)}>
                 <SelectTrigger>
                   <SelectValue placeholder="全部 Token" />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="">全部</SelectItem>
+                  <SelectItem value="all">全部</SelectItem>
                   {tokensData?.tokens.map((token) => (
                     <SelectItem key={token.id} value={token.id}>
                       {token.name} ({token.id.substring(0, 8)})
@@ -136,12 +135,12 @@ export function RequestLogs() {
 
             <div>
               <label className="text-sm font-medium mb-2 block">模式</label>
-              <Select value={modeFilter} onValueChange={setModeFilter}>
+              <Select value={modeFilter || 'all'} onValueChange={(v) => setModeFilter(v === 'all' ? '' : v)}>
                 <SelectTrigger>
                   <SelectValue placeholder="全部模式" />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="">全部</SelectItem>
+                  <SelectItem value="all">全部</SelectItem>
                   <SelectItem value="web">Web</SelectItem>
                   <SelectItem value="api">API</SelectItem>
                 </SelectContent>
@@ -151,14 +150,14 @@ export function RequestLogs() {
             <div>
               <label className="text-sm font-medium mb-2 block">状态</label>
               <Select
-                value={successFilter === undefined ? '' : successFilter.toString()}
-                onValueChange={(v) => setSuccessFilter(v === '' ? undefined : v === 'true')}
+                value={successFilter === undefined ? 'all' : successFilter.toString()}
+                onValueChange={(v) => setSuccessFilter(v === 'all' ? undefined : v === 'true')}
               >
                 <SelectTrigger>
                   <SelectValue placeholder="全部状态" />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="">全部</SelectItem>
+                  <SelectItem value="all">全部</SelectItem>
                   <SelectItem value="true">成功</SelectItem>
                   <SelectItem value="false">失败</SelectItem>
                 </SelectContent>

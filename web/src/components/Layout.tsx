@@ -10,6 +10,9 @@ import {
   LogOut,
   Menu,
   BookOpen,
+  BarChart3,
+  MessageSquare,
+  FileText,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useState } from 'react';
@@ -20,6 +23,9 @@ const navigation = [
   { name: '账号管理', href: '/accounts', icon: Users },
   { name: '会话管理 (旧)', href: '/sessions', icon: Globe },
   { name: 'API 密钥', href: '/api-keys', icon: Server },
+  { name: '用量统计', href: '/usage-stats', icon: BarChart3 },
+  { name: '对话记录', href: '/conversations', icon: MessageSquare },
+  { name: '请求日志', href: '/request-logs', icon: FileText },
   { name: '配置文档', href: '/docs', icon: BookOpen },
 ];
 
