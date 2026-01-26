@@ -194,6 +194,11 @@ func (s *Store) migrate() error {
 		return err
 	}
 
+	// Migrate accounts table to sub2api style
+	if err := s.MigrateAccountsToSub2APIStyle(); err != nil {
+		return err
+	}
+
 	return nil
 }
 

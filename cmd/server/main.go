@@ -235,6 +235,10 @@ func main() {
 	webProxyHandler := handler.NewWebProxyHandler(db, cfg.Claude.WebURL)
 	apiProxyHandler := handler.NewAPIProxyHandler(keyPool, cfg.Claude.APIURL)
 
+	// NEW: Sub2API-style proxy handler (simplified, no circuit breaker dependency)
+	sub2apiProxyHandler := handler.NewSub2APIProxyHandler(db, cfg.Claude.WebURL)
+	log.Info().Msg("initialized sub2api-style proxy handler")
+
 	// Initialize middleware
 	jwtMiddleware := middleware.NewJWTMiddleware(jwtManager, db)
 	adminMiddleware := middleware.NewAdminMiddleware(cfg.Admin.Key)
@@ -346,14 +350,15 @@ func main() {
 		api.GET("/token/info", tokenHandler.Info)
 	}
 
-	// OpenAI-compatible endpoints (require JWT) - use enhanced handler
+	// OpenAI-compatible endpoints (require JWT) - use sub2api handler
 	v1 := router.Group("/v1")
 	v1.Use(jwtMiddleware.Auth())
 	{
-		v1.POST("/chat/completions", enhancedProxyHandler.ChatCompletions)
+		// Use new sub2api-style handler for chat completions
+		v1.POST("/chat/completions", sub2apiProxyHandler.ChatCompletions)
 		v1.GET("/models", enhancedProxyHandler.ListModels)
 
-		// Native Anthropic API proxy - now using enhanced handler for Web/API dual mode
+		// Native Anthropic API proxy - still using enhanced handler
 		v1.POST("/messages", enhancedProxyHandler.Messages)
 		v1.POST("/messages/count_tokens", apiProxyHandler.CountTokens)
 
