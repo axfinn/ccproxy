@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -378,13 +379,33 @@ func (h *Sub2APIProxyHandler) CountTokens(c *gin.Context) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("anthropic-version", "2023-06-01")
 
-	// Set anthropic-beta header (matches sub2api's complete DefaultBetaHeader)
+	// Set anthropic-beta header for OAuth accounts (matches sub2api's getBetaHeader logic)
 	betaHeader := c.GetHeader("anthropic-beta")
 	if betaHeader == "" {
-		// Default beta features for OAuth accounts (matches sub2api)
-		// Includes: claude-code, oauth, interleaved-thinking, fine-grained-tool-streaming
-		// Also includes: prompt-caching, pdfs, token-counting
-		betaHeader = "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14,prompt-caching-2024-07-31,pdfs-2024-09-25,token-counting-2024-11-01"
+		// Extract model from request body to determine appropriate beta header
+		var reqBody map[string]interface{}
+		if err := json.Unmarshal(bodyBytes, &reqBody); err == nil {
+			if modelID, ok := reqBody["model"].(string); ok && strings.Contains(strings.ToLower(modelID), "haiku") {
+				// Haiku models don't need claude-code beta (matches sub2api's HaikuBetaHeader)
+				betaHeader = "oauth-2025-04-20,interleaved-thinking-2025-05-14"
+			}
+		}
+
+		// Default for non-Haiku models (matches sub2api's DefaultBetaHeader)
+		if betaHeader == "" {
+			betaHeader = "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14"
+		}
+	} else {
+		// Client provided beta header - ensure oauth beta is included (matches sub2api's getBetaHeader)
+		if !strings.Contains(betaHeader, "oauth-2025-04-20") {
+			// Insert oauth beta after claude-code if present
+			if strings.Contains(betaHeader, "claude-code-20250219") {
+				betaHeader = strings.Replace(betaHeader, "claude-code-20250219", "claude-code-20250219,oauth-2025-04-20", 1)
+			} else {
+				// No claude-code, put oauth first
+				betaHeader = "oauth-2025-04-20," + betaHeader
+			}
+		}
 	}
 	req.Header.Set("anthropic-beta", betaHeader)
 
