@@ -85,6 +85,7 @@ func (h *APIProxyHandler) proxyRequest(c *gin.Context, path string) {
 		"content-type":                true,
 		"user-agent":                  true,
 		"anthropic-beta":              true,
+		"anthropic-version":           true,
 		"x-stainless-lang":            true,
 		"x-stainless-package-version": true,
 		"x-stainless-os":              true,
@@ -103,7 +104,7 @@ func (h *APIProxyHandler) proxyRequest(c *gin.Context, path string) {
 		}
 	}
 
-	// Ensure required headers are set (use SetHeaderNonCanonical for case-sensitive headers)
+	// Ensure required headers are set (matches sub2api's Claude Code defaults)
 	if c.Request.Header.Get("Content-Type") == "" {
 		r.SetHeader("Content-Type", "application/json")
 	}
@@ -111,10 +112,15 @@ func (h *APIProxyHandler) proxyRequest(c *gin.Context, path string) {
 		r.SetHeader("anthropic-version", "2023-06-01")
 	}
 	if c.Request.Header.Get("User-Agent") == "" {
-		r.SetHeader("User-Agent", "anthropic-sdk-go/0.1.0")
+		r.SetHeader("User-Agent", "claude-cli/2.0.62 (external, cli)")
 	}
 	if c.Request.Header.Get("Accept-Encoding") == "" {
 		r.SetHeader("Accept-Encoding", "gzip, deflate, br")
+	}
+	// Set default anthropic-beta if not provided (for API-key accounts)
+	// Matches sub2api's APIKeyBetaHeader constant
+	if c.Request.Header.Get("anthropic-beta") == "" {
+		r.SetHeader("anthropic-beta", "claude-code-20250219,interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14")
 	}
 
 	// Enable streaming response

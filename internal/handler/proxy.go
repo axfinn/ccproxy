@@ -1149,8 +1149,9 @@ func (h *ProxyHandler) setReqHeaders(r *req.Request, account *store.Account) {
 	if account.IsOAuth() {
 		// OAuth accounts use Bearer token
 		r.SetHeader("Authorization", "Bearer "+account.Credentials.AccessToken)
-		// Add OAuth beta flag if available
-		r.SetHeader("anthropic-beta", "oauth-2025-04-20")
+		// Add complete OAuth beta flags (matches sub2api's DefaultBetaHeader)
+		// Includes: claude-code, oauth, interleaved-thinking, fine-grained-tool-streaming
+		r.SetHeader("anthropic-beta", "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14")
 	} else {
 		// Session key accounts use Cookie
 		r.SetHeader("Cookie", fmt.Sprintf("sessionKey=%s", account.Credentials.SessionKey))

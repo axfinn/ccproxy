@@ -24,7 +24,8 @@ const (
 	OAuthClientID    = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 	OAuthTokenURL    = "https://platform.claude.com/v1/oauth/token"
 	OAuthRedirectURI = "https://platform.claude.com/oauth/code/callback"
-	OAuthScope       = "user:profile user:inference"
+	// OAuthScope - Internal API call (org:create_api_key not supported in API, matches sub2api ScopeAPI)
+	OAuthScope = "user:profile user:inference user:sessions:claude_code"
 
 	// Code Verifier character set (RFC 7636 compliant)
 	codeVerifierCharset = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"

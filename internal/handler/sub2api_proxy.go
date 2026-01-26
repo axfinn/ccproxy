@@ -378,16 +378,26 @@ func (h *Sub2APIProxyHandler) CountTokens(c *gin.Context) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("anthropic-version", "2023-06-01")
 
-	// Set anthropic-beta header (required for features like prompt caching)
+	// Set anthropic-beta header (matches sub2api's complete DefaultBetaHeader)
 	betaHeader := c.GetHeader("anthropic-beta")
 	if betaHeader == "" {
-		// Default beta features for OAuth accounts
-		betaHeader = "oauth-2025-04-20,prompt-caching-2024-07-31,pdfs-2024-09-25,token-counting-2024-11-01"
+		// Default beta features for OAuth accounts (matches sub2api)
+		// Includes: claude-code, oauth, interleaved-thinking, fine-grained-tool-streaming
+		// Also includes: prompt-caching, pdfs, token-counting
+		betaHeader = "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14,prompt-caching-2024-07-31,pdfs-2024-09-25,token-counting-2024-11-01"
 	}
 	req.Header.Set("anthropic-beta", betaHeader)
 
-	// Add browser-like headers for anti-detection
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+	// Add Claude Code client headers (matches sub2api defaults)
+	req.Header.Set("User-Agent", "claude-cli/2.0.62 (external, cli)")
+	req.Header.Set("X-Stainless-Lang", "js")
+	req.Header.Set("X-Stainless-Package-Version", "0.52.0")
+	req.Header.Set("X-Stainless-OS", "Linux")
+	req.Header.Set("X-Stainless-Arch", "x64")
+	req.Header.Set("X-Stainless-Runtime", "node")
+	req.Header.Set("X-Stainless-Runtime-Version", "v22.14.0")
+	req.Header.Set("X-App", "cli")
+	req.Header.Set("Anthropic-Dangerous-Direct-Browser-Access", "true")
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
 
