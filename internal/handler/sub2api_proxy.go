@@ -323,3 +323,48 @@ func (h *Sub2APIProxyHandler) returnResponse(c *gin.Context, resp *http.Response
 	body, _ := io.ReadAll(resp.Body)
 	c.Data(resp.StatusCode, resp.Header.Get("Content-Type"), body)
 }
+
+// CountTokens handles the count_tokens endpoint using Web accounts
+func (h *Sub2APIProxyHandler) CountTokens(c *gin.Context) {
+	// Get schedulable accounts
+	accounts, err := h.store.GetSchedulableAccounts()
+	if err != nil {
+		log.Error().Err(err).Msg("failed to get schedulable accounts")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to query accounts"})
+		return
+	}
+
+	if len(accounts) == 0 {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "no available accounts"})
+		return
+	}
+
+	// Use first available account for token counting
+	account := accounts[0]
+
+	// Read request body
+	bodyBytes, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "failed to read request body"})
+		return
+	}
+
+	// Create request to claude.ai count_tokens endpoint
+	countURL := fmt.Sprintf("%s/api/organizations/%s/chat_conversations/count_tokens", h.webURL, account.OrganizationID)
+	req, _ := http.NewRequestWithContext(c.Request.Context(), "POST", countURL, bytes.NewReader(bodyBytes))
+	setWebHeaders(req, account, h.webURL)
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to count tokens")
+		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to count tokens"})
+		return
+	}
+	defer resp.Body.Close()
+
+	// Return response
+	respBody, _ := io.ReadAll(resp.Body)
+	c.Data(resp.StatusCode, resp.Header.Get("Content-Type"), respBody)
+}

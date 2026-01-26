@@ -258,6 +258,9 @@ func main() {
 	router.POST("/v1/api/event_logging/batch", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"success": true})
 	})
+	router.POST("/api/event_logging/batch", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"success": true})
+	})
 
 	// Prometheus metrics endpoint
 	if metricsCollector != nil {
@@ -360,11 +363,12 @@ func main() {
 
 		// Native Anthropic API proxy - still using enhanced handler
 		v1.POST("/messages", enhancedProxyHandler.Messages)
-		v1.POST("/messages/count_tokens", apiProxyHandler.CountTokens)
+		// Use sub2api handler for count_tokens (supports Web accounts)
+		v1.POST("/messages/count_tokens", sub2apiProxyHandler.CountTokens)
 
 		// Handle double /v1/v1 paths (client has /v1 in base URL)
 		v1.POST("/v1/messages", enhancedProxyHandler.Messages)
-		v1.POST("/v1/messages/count_tokens", apiProxyHandler.CountTokens)
+		v1.POST("/v1/messages/count_tokens", sub2apiProxyHandler.CountTokens)
 	}
 
 	// Web mode routes (direct claude.ai proxy)
