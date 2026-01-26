@@ -324,18 +324,18 @@ func (h *Sub2APIProxyHandler) returnResponse(c *gin.Context, resp *http.Response
 	c.Data(resp.StatusCode, resp.Header.Get("Content-Type"), body)
 }
 
-// CountTokens handles the count_tokens endpoint using Web accounts
+// CountTokens handles the count_tokens endpoint using Anthropic API
 func (h *Sub2APIProxyHandler) CountTokens(c *gin.Context) {
 	// Get schedulable accounts
 	accounts, err := h.store.GetSchedulableAccounts()
 	if err != nil {
 		log.Error().Err(err).Msg("failed to get schedulable accounts")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to query accounts"})
+		h.countTokensError(c, http.StatusInternalServerError, "api_error", "Failed to query accounts")
 		return
 	}
 
 	if len(accounts) == 0 {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "no available accounts"})
+		h.countTokensError(c, http.StatusServiceUnavailable, "api_error", "No available accounts")
 		return
 	}
 
@@ -345,26 +345,108 @@ func (h *Sub2APIProxyHandler) CountTokens(c *gin.Context) {
 	// Read request body
 	bodyBytes, err := io.ReadAll(c.Request.Body)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "failed to read request body"})
+		h.countTokensError(c, http.StatusBadRequest, "invalid_request_error", "Failed to read request body")
 		return
 	}
 
-	// Create request to claude.ai count_tokens endpoint
-	countURL := fmt.Sprintf("%s/api/organizations/%s/chat_conversations/count_tokens", h.webURL, account.OrganizationID)
-	req, _ := http.NewRequestWithContext(c.Request.Context(), "POST", countURL, bytes.NewReader(bodyBytes))
-	setWebHeaders(req, account, h.webURL)
-	req.Header.Set("Content-Type", "application/json")
+	if len(bodyBytes) == 0 {
+		h.countTokensError(c, http.StatusBadRequest, "invalid_request_error", "Request body is empty")
+		return
+	}
 
+	// Use Anthropic API endpoint (not web API)
+	countURL := "https://api.anthropic.com/v1/messages/count_tokens?beta=true"
+
+	// Create request
+	req, err := http.NewRequestWithContext(c.Request.Context(), "POST", countURL, bytes.NewReader(bodyBytes))
+	if err != nil {
+		h.countTokensError(c, http.StatusInternalServerError, "api_error", "Failed to create request")
+		return
+	}
+
+	// Set authentication header based on account type
+	if account.IsOAuth() {
+		req.Header.Set("Authorization", "Bearer "+account.Credentials.AccessToken)
+	} else if account.Credentials.SessionKey != "" {
+		// For sessionKey accounts, we can't use count_tokens API directly
+		// Return a mock response
+		c.JSON(http.StatusOK, gin.H{"input_tokens": 0})
+		return
+	}
+
+	// Set required headers
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("anthropic-version", "2023-06-01")
+
+	// Set anthropic-beta header (required for features like prompt caching)
+	betaHeader := c.GetHeader("anthropic-beta")
+	if betaHeader == "" {
+		// Default beta features for OAuth accounts
+		betaHeader = "oauth-2025-04-20,prompt-caching-2024-07-31,pdfs-2024-09-25,token-counting-2024-11-01"
+	}
+	req.Header.Set("anthropic-beta", betaHeader)
+
+	// Add browser-like headers for anti-detection
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+
+	// Execute request
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Error().Err(err).Msg("failed to count tokens")
-		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to count tokens"})
+		log.Error().Err(err).Str("account_id", account.ID).Msg("failed to count tokens")
+		h.countTokensError(c, http.StatusBadGateway, "upstream_error", "Request failed")
 		return
 	}
 	defer resp.Body.Close()
 
-	// Return response
-	respBody, _ := io.ReadAll(resp.Body)
-	c.Data(resp.StatusCode, resp.Header.Get("Content-Type"), respBody)
+	// Read response body
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		h.countTokensError(c, http.StatusBadGateway, "upstream_error", "Failed to read response")
+		return
+	}
+
+	// Handle error responses
+	if resp.StatusCode >= 400 {
+		log.Error().
+			Int("status", resp.StatusCode).
+			Str("account_id", account.ID).
+			Str("response", string(respBody)).
+			Msg("count_tokens upstream error")
+
+		// Return error in Anthropic API format
+		var errMsg string
+		switch resp.StatusCode {
+		case 400:
+			errMsg = "Invalid request"
+		case 401:
+			errMsg = "Authentication failed"
+		case 403:
+			errMsg = "Access forbidden"
+		case 429:
+			errMsg = "Rate limit exceeded"
+		case 529:
+			errMsg = "Service overloaded"
+		default:
+			errMsg = "Upstream request failed"
+		}
+		h.countTokensError(c, resp.StatusCode, "upstream_error", errMsg)
+		return
+	}
+
+	// Return successful response
+	c.Data(resp.StatusCode, "application/json", respBody)
+}
+
+// countTokensError returns count_tokens error in Anthropic API format
+func (h *Sub2APIProxyHandler) countTokensError(c *gin.Context, status int, errType, message string) {
+	c.JSON(status, gin.H{
+		"type": "error",
+		"error": gin.H{
+			"type":    errType,
+			"message": message,
+		},
+	})
 }
