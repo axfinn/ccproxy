@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 
+	"ccproxy/internal/service"
 	"ccproxy/internal/store"
 )
 
@@ -22,15 +23,51 @@ type Sub2APIProxyHandler struct {
 	store           *store.Store
 	webURL          string
 	errorClassifier *ErrorClassifier
+	oauthService    *service.OAuthService // For token refresh (matches sub2api's ClaudeTokenProvider)
 }
 
 // NewSub2APIProxyHandler creates a new sub2api-style proxy handler
-func NewSub2APIProxyHandler(st *store.Store, webURL string) *Sub2APIProxyHandler {
+func NewSub2APIProxyHandler(st *store.Store, webURL string, oauthService *service.OAuthService) *Sub2APIProxyHandler {
 	return &Sub2APIProxyHandler{
 		store:           st,
 		webURL:          webURL,
 		errorClassifier: NewErrorClassifier(st),
+		oauthService:    oauthService,
 	}
+}
+
+// getValidAccessToken gets a valid access token for OAuth account, refreshing if needed
+// Matches sub2api's ClaudeTokenProvider.GetAccessToken behavior
+func (h *Sub2APIProxyHandler) getValidAccessToken(account *store.Account) (string, error) {
+	if !account.IsOAuth() {
+		return "", fmt.Errorf("account is not an OAuth account")
+	}
+
+	// Check if token needs refresh (matches sub2api's claudeTokenRefreshSkew = 3 minutes)
+	if account.ExpiresAt != nil && time.Until(*account.ExpiresAt) <= 3*time.Minute {
+		log.Info().
+			Str("account_id", account.ID).
+			Time("expires_at", *account.ExpiresAt).
+			Msg("token expiring soon, refreshing")
+
+		// Refresh token
+		if err := h.oauthService.RefreshAccountToken(account); err != nil {
+			log.Error().Err(err).Str("account_id", account.ID).Msg("failed to refresh token")
+			// Don't fail immediately - try using existing token
+			// This matches sub2api's behavior of using short TTL cache on refresh failure
+		} else {
+			log.Info().
+				Str("account_id", account.ID).
+				Time("new_expires_at", *account.ExpiresAt).
+				Msg("token refreshed successfully")
+		}
+	}
+
+	if account.Credentials.AccessToken == "" {
+		return "", fmt.Errorf("access_token not found in credentials")
+	}
+
+	return account.Credentials.AccessToken, nil
 }
 
 // ChatCompletions handles OpenAI-compatible chat completion requests
@@ -197,6 +234,16 @@ func selectBestAccount(accounts []*store.Account) *store.Account {
 
 // executeWebRequest executes a request to claude.ai
 func (h *Sub2APIProxyHandler) executeWebRequest(ctx context.Context, account *store.Account, req *OpenAIChatRequest) (*http.Response, error) {
+	// Get valid access token for OAuth accounts (auto-refresh if needed)
+	var accessToken string
+	if account.IsOAuth() {
+		var err error
+		accessToken, err = h.getValidAccessToken(account)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get valid access token: %w", err)
+		}
+	}
+
 	// Build prompt from messages
 	prompt := buildPromptFromMessages(req.Messages)
 
@@ -210,7 +257,7 @@ func (h *Sub2APIProxyHandler) executeWebRequest(ctx context.Context, account *st
 
 	createURL := fmt.Sprintf("%s/api/organizations/%s/chat_conversations", h.webURL, account.OrganizationID)
 	createReq, _ := http.NewRequestWithContext(ctx, "POST", createURL, bytes.NewReader(createPayloadBytes))
-	setWebHeaders(createReq, account, h.webURL)
+	setWebHeaders(createReq, account, h.webURL, accessToken)
 	createReq.Header.Set("Content-Type", "application/json")
 
 	client := &http.Client{Timeout: 30 * time.Second}
@@ -237,7 +284,7 @@ func (h *Sub2APIProxyHandler) executeWebRequest(ctx context.Context, account *st
 	msgURL := fmt.Sprintf("%s/api/organizations/%s/chat_conversations/%s/completion",
 		h.webURL, account.OrganizationID, convUUID)
 	msgReq, _ := http.NewRequestWithContext(ctx, "POST", msgURL, bytes.NewReader(msgPayloadBytes))
-	setWebHeaders(msgReq, account, h.webURL)
+	setWebHeaders(msgReq, account, h.webURL, accessToken)
 	msgReq.Header.Set("Content-Type", "application/json")
 	msgReq.Header.Set("Accept", "text/event-stream")
 
@@ -250,7 +297,8 @@ func (h *Sub2APIProxyHandler) executeWebRequest(ctx context.Context, account *st
 }
 
 // setWebHeaders sets request headers for claude.ai requests
-func setWebHeaders(r *http.Request, account *store.Account, webURL string) {
+// accessToken parameter is used for OAuth accounts (empty for session_key accounts)
+func setWebHeaders(r *http.Request, account *store.Account, webURL string, accessToken string) {
 	// Modern browser Client Hints
 	r.Header.Set("Sec-Ch-Ua", `"Chromium";v="131", "Not_A Brand";v="24"`)
 	r.Header.Set("Sec-Ch-Ua-Mobile", "?0")
@@ -271,10 +319,11 @@ func setWebHeaders(r *http.Request, account *store.Account, webURL string) {
 	r.Header.Set("Origin", webURL)
 	r.Header.Set("Referer", webURL+"/")
 
-	// Set authentication
+	// Set authentication (matches sub2api's complete beta header for OAuth)
 	if account.IsOAuth() {
-		r.Header.Set("Authorization", "Bearer "+account.Credentials.AccessToken)
-		r.Header.Set("anthropic-beta", "oauth-2025-04-20")
+		r.Header.Set("Authorization", "Bearer "+accessToken)
+		// Complete OAuth beta flags (matches sub2api's DefaultBetaHeader)
+		r.Header.Set("anthropic-beta", "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14")
 	} else {
 		r.Header.Set("Cookie", fmt.Sprintf("sessionKey=%s", account.Credentials.SessionKey))
 	}
@@ -367,7 +416,14 @@ func (h *Sub2APIProxyHandler) CountTokens(c *gin.Context) {
 
 	// Set authentication header based on account type
 	if account.IsOAuth() {
-		req.Header.Set("Authorization", "Bearer "+account.Credentials.AccessToken)
+		// Get valid access token (auto-refresh if needed, matches sub2api's ClaudeTokenProvider)
+		accessToken, err := h.getValidAccessToken(account)
+		if err != nil {
+			log.Error().Err(err).Str("account_id", account.ID).Msg("failed to get valid access token")
+			h.countTokensError(c, http.StatusUnauthorized, "authentication_error", "Failed to get valid access token")
+			return
+		}
+		req.Header.Set("Authorization", "Bearer "+accessToken)
 	} else if account.Credentials.SessionKey != "" {
 		// For sessionKey accounts, we can't use count_tokens API directly
 		// Return a mock response

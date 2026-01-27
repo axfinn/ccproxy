@@ -235,9 +235,9 @@ func main() {
 	webProxyHandler := handler.NewWebProxyHandler(db, cfg.Claude.WebURL)
 	apiProxyHandler := handler.NewAPIProxyHandler(keyPool, cfg.Claude.APIURL)
 
-	// NEW: Sub2API-style proxy handler (simplified, no circuit breaker dependency)
-	sub2apiProxyHandler := handler.NewSub2APIProxyHandler(db, cfg.Claude.WebURL)
-	log.Info().Msg("initialized sub2api-style proxy handler")
+	// NEW: Sub2API-style proxy handler (with OAuth token refresh support)
+	sub2apiProxyHandler := handler.NewSub2APIProxyHandler(db, cfg.Claude.WebURL, oauthService)
+	log.Info().Msg("initialized sub2api-style proxy handler with OAuth token refresh")
 
 	// Initialize middleware
 	jwtMiddleware := middleware.NewJWTMiddleware(jwtManager, db)
