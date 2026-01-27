@@ -374,6 +374,232 @@ func (h *Sub2APIProxyHandler) returnResponse(c *gin.Context, resp *http.Response
 	c.Data(resp.StatusCode, resp.Header.Get("Content-Type"), body)
 }
 
+// Messages handles native Anthropic API /v1/messages requests using OAuth tokens
+func (h *Sub2APIProxyHandler) Messages(c *gin.Context) {
+	var req AnthropicRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if len(req.Messages) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "messages cannot be empty"})
+		return
+	}
+
+	ctx := c.Request.Context()
+
+	// Select account with retry logic (sub2api style)
+	maxRetries := 3
+	var excludedAccountIDs []string
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		// Get schedulable accounts
+		accounts, err := h.store.GetSchedulableAccounts()
+		if err != nil {
+			log.Error().Err(err).Msg("failed to get schedulable accounts")
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to query accounts"})
+			return
+		}
+
+		// Filter out excluded accounts
+		var availableAccounts []*store.Account
+		for _, acc := range accounts {
+			excluded := false
+			for _, exID := range excludedAccountIDs {
+				if acc.ID == exID {
+					excluded = true
+					break
+				}
+			}
+			if !excluded && acc.IsSchedulable() {
+				availableAccounts = append(availableAccounts, acc)
+			}
+		}
+
+		if len(availableAccounts) == 0 {
+			log.Warn().
+				Int("attempt", attempt+1).
+				Int("excluded", len(excludedAccountIDs)).
+				Msg("no schedulable accounts available")
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"error":   "no available accounts",
+				"details": fmt.Sprintf("excluded=%d, attempt=%d/%d", len(excludedAccountIDs), attempt+1, maxRetries),
+			})
+			return
+		}
+
+		// Select best account (lowest priority, least recently used)
+		account := selectBestAccount(availableAccounts)
+
+		log.Info().
+			Str("account_id", account.ID).
+			Str("account_name", account.Name).
+			Int("attempt", attempt+1).
+			Int("available", len(availableAccounts)).
+			Msg("selected account for /v1/messages request")
+
+		// Execute request using Anthropic API
+		resp, err := h.executeAnthropicAPIRequest(ctx, account, &req, c)
+
+		// Handle errors
+		if err != nil {
+			log.Error().
+				Err(err).
+				Str("account_id", account.ID).
+				Int("attempt", attempt+1).
+				Msg("Anthropic API request execution failed")
+
+			// Classify error and update account status
+			shouldSwitch := h.errorClassifier.ClassifyAndHandleError(nil, account.ID)
+
+			if shouldSwitch && attempt < maxRetries-1 {
+				excludedAccountIDs = append(excludedAccountIDs, account.ID)
+				log.Info().Str("account_id", account.ID).Msg("switching to next account")
+				continue
+			}
+
+			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+			return
+		}
+
+		// Check response status
+		if resp.StatusCode >= 400 {
+			// Error response, classify and handle
+			shouldSwitch := h.errorClassifier.ClassifyAndHandleError(resp, account.ID)
+
+			// For error responses, read body and return
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+
+			// If should switch and we have retries left, try next account
+			if shouldSwitch && attempt < maxRetries-1 && (resp.StatusCode == 429 || resp.StatusCode == 401 || resp.StatusCode == 403 || resp.StatusCode == 503) {
+				excludedAccountIDs = append(excludedAccountIDs, account.ID)
+				log.Info().
+					Str("account_id", account.ID).
+					Int("status_code", resp.StatusCode).
+					Msg("switching account due to error")
+				continue
+			}
+
+			// Return error to client
+			c.Data(resp.StatusCode, resp.Header.Get("Content-Type"), body)
+			return
+		}
+
+		// Success! Record it
+		h.errorClassifier.RecordSuccess(account.ID)
+		go h.store.UpdateAccountLastUsed(account.ID)
+
+		// Stream response directly (Anthropic native format)
+		if req.Stream {
+			h.streamAnthropicResponse(c, resp)
+		} else {
+			h.returnAnthropicResponse(c, resp)
+		}
+		return
+	}
+
+	// All retries exhausted
+	c.JSON(http.StatusServiceUnavailable, gin.H{
+		"error": "all retry attempts exhausted",
+	})
+}
+
+// executeAnthropicAPIRequest executes a request to Anthropic API using OAuth token
+func (h *Sub2APIProxyHandler) executeAnthropicAPIRequest(ctx context.Context, account *store.Account, req *AnthropicRequest, c *gin.Context) (*http.Response, error) {
+	// Get valid access token for OAuth accounts (auto-refresh if needed)
+	var accessToken string
+	if account.IsOAuth() {
+		var err error
+		accessToken, err = h.getValidAccessToken(account)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get valid access token: %w", err)
+		}
+	} else {
+		return nil, fmt.Errorf("only OAuth accounts are supported for /v1/messages")
+	}
+
+	// Marshal request body
+	bodyBytes, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	// Create request to Anthropic API
+	apiURL := "https://api.anthropic.com/v1/messages"
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", apiURL, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	// Set authentication header
+	httpReq.Header.Set("Authorization", "Bearer "+accessToken)
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("anthropic-version", "2023-06-01")
+
+	// Set anthropic-beta header (matches sub2api's getBetaHeader logic)
+	betaHeader := c.GetHeader("anthropic-beta")
+	if betaHeader == "" {
+		// Determine beta header based on model
+		if strings.Contains(strings.ToLower(req.Model), "haiku") {
+			// Haiku models don't need claude-code beta
+			betaHeader = "oauth-2025-04-20,interleaved-thinking-2025-05-14"
+		} else {
+			// Default for non-Haiku models
+			betaHeader = "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14"
+		}
+	} else {
+		// Client provided beta header - ensure oauth beta is included
+		if !strings.Contains(betaHeader, "oauth-2025-04-20") {
+			if strings.Contains(betaHeader, "claude-code-20250219") {
+				betaHeader = strings.Replace(betaHeader, "claude-code-20250219", "claude-code-20250219,oauth-2025-04-20", 1)
+			} else {
+				betaHeader = "oauth-2025-04-20," + betaHeader
+			}
+		}
+	}
+	httpReq.Header.Set("anthropic-beta", betaHeader)
+
+	// Add Claude Code client headers
+	httpReq.Header.Set("User-Agent", "claude-cli/2.0.62 (external, cli)")
+	httpReq.Header.Set("X-Stainless-Lang", "js")
+	httpReq.Header.Set("X-Stainless-Package-Version", "0.52.0")
+	httpReq.Header.Set("X-Stainless-OS", "Linux")
+	httpReq.Header.Set("X-Stainless-Arch", "x64")
+	httpReq.Header.Set("X-Stainless-Runtime", "node")
+	httpReq.Header.Set("X-Stainless-Runtime-Version", "v22.14.0")
+	httpReq.Header.Set("X-App", "cli")
+	httpReq.Header.Set("Anthropic-Dangerous-Direct-Browser-Access", "true")
+
+	// Execute request
+	client := &http.Client{Timeout: 10 * time.Minute}
+	return client.Do(httpReq)
+}
+
+// streamAnthropicResponse streams the Anthropic API response to client
+func (h *Sub2APIProxyHandler) streamAnthropicResponse(c *gin.Context, resp *http.Response) {
+	defer resp.Body.Close()
+
+	// Copy response headers
+	for key, values := range resp.Header {
+		for _, value := range values {
+			c.Writer.Header().Add(key, value)
+		}
+	}
+
+	c.Status(resp.StatusCode)
+	io.Copy(c.Writer, resp.Body)
+}
+
+// returnAnthropicResponse returns the full Anthropic API response to client
+func (h *Sub2APIProxyHandler) returnAnthropicResponse(c *gin.Context, resp *http.Response) {
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	c.Data(resp.StatusCode, resp.Header.Get("Content-Type"), body)
+}
+
 // CountTokens handles the count_tokens endpoint using Anthropic API
 func (h *Sub2APIProxyHandler) CountTokens(c *gin.Context) {
 	// Get schedulable accounts

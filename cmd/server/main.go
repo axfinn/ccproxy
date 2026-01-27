@@ -357,17 +357,16 @@ func main() {
 	v1 := router.Group("/v1")
 	v1.Use(jwtMiddleware.Auth())
 	{
-		// Use new sub2api-style handler for chat completions
+		// Use sub2api-style handler (OAuth token → Anthropic API)
 		v1.POST("/chat/completions", sub2apiProxyHandler.ChatCompletions)
 		v1.GET("/models", enhancedProxyHandler.ListModels)
 
-		// Native Anthropic API proxy - still using enhanced handler
-		v1.POST("/messages", enhancedProxyHandler.Messages)
-		// Use sub2api handler for count_tokens (supports Web accounts)
+		// Native Anthropic API proxy - use sub2api handler (OAuth token → Anthropic API)
+		v1.POST("/messages", sub2apiProxyHandler.Messages)
 		v1.POST("/messages/count_tokens", sub2apiProxyHandler.CountTokens)
 
 		// Handle double /v1/v1 paths (client has /v1 in base URL)
-		v1.POST("/v1/messages", enhancedProxyHandler.Messages)
+		v1.POST("/v1/messages", sub2apiProxyHandler.Messages)
 		v1.POST("/v1/messages/count_tokens", sub2apiProxyHandler.CountTokens)
 	}
 
